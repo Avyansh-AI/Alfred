@@ -405,6 +405,7 @@ let starfield = null, core = null;
 let camRadius = 420;            // camera distance from the centre, set after layout
 let litIds = new Set(), litPair = new Set();
 let selected = null;            // currently focused node
+let lastFlyTo = null;           // destination of the most recent camera flight
 let hoveredId = null;
 let domainNodes = null;         // set when filtering by group
 
@@ -569,16 +570,67 @@ function clearFocus(){
 /* -- camera --------------------------------------------------------------- */
 function flyTo(node){
   if (!Graph) return;
-  const d = Math.max(70, camRadius * 0.42);
-  const dist = Math.hypot(node.x || 0, node.y || 0, node.z || 0);
-  const r = dist + 0.0001;
-  Graph.cameraPosition(
-    {x: node.x * (1 + d/r), y: node.y * (1 + d/r), z: node.z * (1 + d/r)},
-    {x: node.x, y: node.y, z: node.z},
-    CFG.flyMs
-  );
-  if (controls) controls.target.set(node.x || 0, node.y || 0, node.z || 0);
+  flyingUntil = performance.now() + CFG.flyMs + 400;   // hold the drift off
+  markActivity();                                      // and stop it right now
+  // Approach distance scales with the node's own neighbourhood, not with the size
+  // of the whole galaxy - otherwise a click on a small cluster ends up staring at
+  // it from across the map. Falls back to a fraction of the framed radius.
+  const neigh = adj.get(node.id) || [];
+  let scale = 0;
+  neigh.forEach(({node: n2}) => {
+    if (n2.x == null) return;
+    scale += Math.hypot(n2.x - node.x, n2.y - node.y, n2.z - node.z);
+  });
+  scale = neigh.length ? scale / neigh.length : 0;
+  const d = Math.max(70, Math.min(camRadius * 0.5, scale ? scale * 2.1 : camRadius * 0.24));
+
+  const nx = node.x || 0, ny = node.y || 0, nz = node.z || 0;
+  const dist = Math.hypot(nx, ny, nz) || 1;
+  const camPos = {x: nx * (1 + d / dist), y: ny * (1 + d / dist), z: nz * (1 + d / dist)};
+
+  // The side panel covers the right-hand third of the screen. Pan the camera so the
+  // node we just flew to sits in the middle of what is actually visible, instead of
+  // hiding behind the panel.
+  const pan = panelPanOffset(nx, ny, nz, camPos, d);
+  const target = {x: nx + pan.x, y: ny + pan.y, z: nz + pan.z};
+
+  Graph.cameraPosition({x: camPos.x + pan.x, y: camPos.y + pan.y, z: camPos.z + pan.z},
+                       target, CFG.flyMs);
+  if (controls) controls.target.set(target.x, target.y, target.z);
+  // where this flight is headed - handy for tests and for debugging
+  lastFlyTo = {pos: {x: camPos.x + pan.x, y: camPos.y + pan.y, z: camPos.z + pan.z},
+               target: target, node: {x: nx, y: ny, z: nz}, distance: d, at: performance.now()};
 }
+
+function panelPanOffset(nx, ny, nz, camPos, d){
+  const none = {x: 0, y: 0, z: 0};
+  if (!panel || !panel.classList.contains('open')) return none;
+  const viewportW = window.innerWidth || 1;
+  const panelW = panel.getBoundingClientRect().width;
+  const visibleW = Math.max(120, viewportW - panelW);
+  if (panelW <= 0 || visibleW >= viewportW - 1) return none;
+  // how far left of screen centre the node must appear, in pixels
+  const shiftPx = panelW / 2;
+  const screenW = 2 * d * Math.tan((((camera && camera.fov) || 50) * Math.PI / 180) / 2) * (viewportW / (window.innerHeight || 1));
+  const world = (shiftPx / viewportW) * screenW;
+  // camera "right" is cross(up, backward) with up = +Y, so (b_z, 0, -b_x) - moving the
+  // camera that way slides the subject to the left on screen
+  const bx = camPos.x - nx, by = camPos.y - ny, bz = camPos.z - nz;
+  const bl = Math.hypot(bx, by, bz) || 1;
+  const rx = bz / bl, ry = 0, rz = -bx / bl;
+  const rl = Math.hypot(rx, ry, rz) || 1;
+  return {x: (rx / rl) * world, y: (ry / rl) * world, z: (rz / rl) * world};
+}
+function measureGalaxy(){
+  try {
+    const bb = Graph.getGraphBbox();
+    const span = bb ? Math.max(
+      (bb.x[1] - bb.x[0]) || 0, (bb.y[1] - bb.y[0]) || 0, (bb.z[1] - bb.z[0]) || 0) : 0;
+    camRadius = Math.min(1600, Math.max(240, span * 1.55));
+  } catch (err){ camRadius = 420; }
+  return camRadius;
+}
+
 function resetCamera(animate = 1200){
   if (!Graph) return;
   Graph.cameraPosition({x: 0, y: camRadius * 0.22, z: camRadius}, {x: 0, y: 0, z: 0}, animate);
@@ -587,13 +639,17 @@ function resetCamera(animate = 1200){
 
 /* -- idle drift ----------------------------------------------------------- */
 let lastTouch = 0;
+let flyingUntil = 0;
 function markActivity(){
   lastTouch = performance.now();
   if (controls && controls.autoRotate) controls.autoRotate = false;
 }
 function tickIdle(){
   if (!controls) return;
-  const idle = performance.now() - lastTouch > CFG.idleDelay;
+  // never let the idle drift run while a camera flight is in progress: the two
+  // both write camera.position and the drift wins, which makes a click look dead
+  const busy = performance.now() < flyingUntil;
+  const idle = !busy && performance.now() - lastTouch > CFG.idleDelay;
   if (idle !== controls.autoRotate) controls.autoRotate = idle;
   requestAnimationFrame(tickIdle);
 }
@@ -799,15 +855,18 @@ async function boot3d(){
   $('stats').textContent = `${NODES.length} notes · ${linkObjs.length} links · ` +
                            `${Object.keys(COLORS).length} groups`;
 
-  // frame the whole galaxy once the layout has settled
+  // Frame the whole galaxy once the layout settles - but only while the viewer has
+  // not taken the camera anywhere itself. On a slow machine (or a big vault) the
+  // simulation can still be cooling for many seconds after load, and without this
+  // guard the auto-frame fires *after* a click and drags the camera away from the
+  // note the user just flew to.
   Graph.onEngineStop(() => {
-    try {
-      const bb = Graph.getGraphBbox();
-      const span = bb ? Math.max(
-        (bb.x[1] - bb.x[0]) || 0, (bb.y[1] - bb.y[0]) || 0, (bb.z[1] - bb.z[0]) || 0) : 0;
-      camRadius = Math.min(1600, Math.max(240, span * 1.55));
-    } catch (err){ camRadius = 420; }
-    resetCamera(1600);
+    measureGalaxy();
+    if (!selected && !lastFlyTo){
+      resetCamera(1600);
+    } else {
+      console.log('[alfred] layout settled; leaving the camera where the viewer put it');
+    }
     setTimeout(verifyRender, 900);
   });
 
@@ -825,7 +884,9 @@ async function boot3d(){
   // fade the boot overlay out as soon as we have actually drawn frames
   setTimeout(() => boot.classList.add('gone'), 400);
   window.__alfred = {graph: Graph, data: GRAPH, selfTest: verifyRender, focus: setFocus,
-                     reset: clearFocus, loadScript, loadThree, CFG};
+                     reset: clearFocus, loadScript, loadThree, CFG,
+                     camRadius: () => camRadius, lastFlyTo: () => lastFlyTo,
+                     layoutStable: () => !Graph || Graph.graphData().nodes.every(n => n.fx === undefined)};
 }
 
 /* -- in-browser health check: is the renderer really drawing? -------------- */

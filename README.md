@@ -64,6 +64,20 @@ The label comes from the filename, the group is the parent folder, and each node
 ~700-character excerpt. `[[wikilinks]]` and plain prose mentions of another note's title both
 create links.
 
+## What the real browser check caught
+
+`tools/browser-check.mjs` opens the page in Chrome, waits for WebGL frames, clicks a star, asks a
+question and screenshots the result. It found three things that headless logic tests could not:
+
+* **The auto-frame stole the camera.** On a slow machine the force layout is still cooling when
+  you click a star, and `onEngineStop` then fired and yanked the camera back to the framed view.
+  The auto-frame now defers whenever you have focused something.
+* **The idle drift fought the fly-to.** OrbitControls' `autoRotate` and the camera tween both write
+  `camera.position`; with the drift running, a click looked like it did nothing. The drift now
+  stands down for the duration of a flight.
+* **The focused note hid behind the side panel.** The camera now pans so the note you flew to sits
+  in the middle of the *visible* area - measured at 602px against a visible centre of 605px.
+
 ## Files
 
 | path | what it is |
@@ -74,7 +88,9 @@ create links.
 | `viewer/graph-data.js` | generated - rebuilt by `build.py`, never edit by hand |
 | `config.json` | your key and model (git-ignored, created automatically if missing) |
 | `notes/` | a 12-note sample vault to show the thing off |
-| `tools/verify.sh` | one command that re-checks the indexer, the viewer and the brain |
+| `tools/verify.sh` | one command that re-checks the indexer, the viewer, the brain and the browser |
+| `tools/browser-check.mjs` | opens the real page in Chrome, clicks a star, asks a question, screenshots it |
+| `tools/screenshots/` | screenshots produced by that check (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -105,6 +121,10 @@ npm - which is exactly the situation this project was verified in.
 * `tools/verify.py` - starts the real server, checks static serving and path-traversal
   refusals, runs the full `/chat` path against a stub OpenAI endpoint, and confirms a
   placeholder key produces a clean error rather than a crash.
+* `tools/browser-check.mjs` - drives the actual page in a real browser: 40 checks covering the
+  drawn frame (pixel statistics), click-to-fly, panel contents, camera framing, the ask bar,
+  the idle drift, keyboard shortcuts and the offline fallback. Needs Chrome; skip it with
+  `SKIP_BROWSER=1 ./tools/verify.sh`.
 
 In the browser, `__alfred.selfTest()` in the console reports whether the renderer is actually
 drawing (it also drives the "live" badge in the HUD).

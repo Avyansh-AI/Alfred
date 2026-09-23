@@ -19,6 +19,18 @@ if command -v node >/dev/null 2>&1; then node tools/verify.mjs | tail -6; mark $
 step "server + brain end-to-end (python3 tools/verify.py)"
 python3 tools/verify.py | tail -8; mark ${PIPESTATUS[0]}
 
+step "real browser render + interactions (node tools/browser-check.mjs)"
+if [ "${SKIP_BROWSER:-0}" = "1" ]; then
+  echo "   -> skipped (SKIP_BROWSER=1)"
+elif ! command -v node >/dev/null 2>&1; then
+  echo "   -> skipped (node not installed)"
+else
+  node tools/browser-check.mjs 2>&1 | tail -14
+  code=${PIPESTATUS[0]}
+  [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
+  mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
+fi
+
 printf '\n\033[1m== summary\033[0m\n%d groups passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
 echo "

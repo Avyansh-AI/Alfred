@@ -13,3 +13,7 @@ venv/
 
 # optional offline copies of the CDN files (python3 tools/vendor.py)
 viewer/vendor/
+
+# screenshots are committed as evidence for the README
+!tools/screenshots/
+!tools/screenshots/*.jpg
