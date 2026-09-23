@@ -4,8 +4,8 @@ A 3D knowledge galaxy built from your markdown notes, with a brain you can talk 
 
 Every `.md` file becomes a glowing star. Notes that mention each other are joined by faint
 light. Click a star and the camera flies to it, lights up its neighbours and opens the note.
-Type a question in the bar at the bottom and the answer is drawn from your own notes - never
-from the internet, never from imagination. The galaxy shows you which notes it used: it flies to
+Type a question in the bar at the bottom and it is answered by a dry, impeccably polite British
+butler, from your own notes - never from the internet, never from imagination. The galaxy shows you which notes it used: it flies to
 the note when there is one, lights the whole cluster when there are several, and stays still when
 you were only saying good morning. It answers out loud too, and you can just hold a conversation
 with it using the microphone button.
@@ -53,6 +53,63 @@ The input bar at the bottom posts to `POST /chat`. The server
 3. returns `{"answer": "...", "nodes": [indexes used]}` and lights those notes up in the galaxy,
 4. keeps the last 3 exchanges in server-side history so follow-ups ("and what about the deposit?")
    work.
+
+## The character
+
+Alfred answers as a dry, impeccably polite British butler with a razor wit, and all of the
+character lives in **one commented block at the top of `server.py`** - the banner that starts
+"THE PERSONA". Nothing below that block knows what he sounds like, so the character can be
+rewritten without hunting through the file:
+
+```python
+# ============================== T H E   P E R S O N A ==============================
+PERSONA      = "You are Alfred, a dry, impeccably polite British butler ..."
+ANSWER_STYLE = "- Open with ONE short, dry line of wit, then give him the facts. ..."
+CHAT_STYLE   = "- This is not a question about his notes: it is a greeting ..."
+SYSTEM_PROMPT = PERSONA + ...      # questions about the notes
+CHAT_PROMPT   = PERSONA + ...      # small talk, jokes, anything else
+GREETING      = "Good {part_of_day}, sir. {count} notes indexed, all present and accounted for."
+PARTS_OF_DAY  = ((5, 12, "morning"), (12, 17, "afternoon"), (17, 23, "evening"), (23, 5, "evening"))
+def greeting(count, hour=None): ...
+# ============================== end of the persona =================================
+```
+
+The rules in the prompts: say "sir" once in a while, never in every sentence; **one** short dry
+line of wit and then the facts; never recite a note back (he wrote it, it is on his screen); one
+genuinely funny line beats three bland ones, and if nothing funny is available, be brief rather
+than force it; when the notes do not cover something, say so plainly and with dignity - never
+invent a source, never pad, never dress up a related note as the answer.
+
+Small talk never reaches the camera: the server decides that a greeting or a joke is not a
+question about the notes (see [Where an answer came from](#where-an-answer-came-from)) and the
+viewer holds the galaxy still.
+
+### The greeting
+
+On load he greets you with the real note count and the time of day:
+
+> Good morning, sir. 12 notes indexed, all present and accounted for.
+
+The number comes from the notes the server actually holds (`len(state.notes)`), never from a
+string written by hand - `verify.py` serves a three-note vault and checks he says three, and
+checks that the count matches the nodes the galaxy is drawn from. The salutation comes from
+*your* clock: the page sends its local hour with the `/health` request, and the server composes
+the line. It is spoken like anything else, which means before the first click it waits quietly
+and is heard the moment the page is touched - and in a `?mute=1` tab it is shown and never
+spoken.
+
+### Five things to say to him
+
+Ask these in order and you will have seen the whole character. The third is the one it cannot
+answer; the fourth is the one where the wit has to do the work.
+
+| say this | what to expect |
+| --- | --- |
+| "What is the budget for the move, and where did the 74,700 come from?" | **one note**: the camera flies to *Budget for the Move*, its neighbours light, the panel opens with the figures. A dry line about the 55,000 you told everyone, then the numbers. |
+| "What should I get done in the last week before moving?" | **six notes**: no flight, the whole cluster lights, and he gives you the shape of the week instead of reciting the checklist at you. |
+| "Be honest with me: am I over budget?" | **one note**, flown to, and the most butler-like answer in the vault: the ledger, the sofa on OLX, and a verdict delivered politely. |
+| "Good morning, Alfred. Any advice for today?" | **small talk**: nothing moves, nothing lights, no panel - one short line back, in character. |
+| "Did I remember to cancel the newspaper?" | **nothing at all**: the notes do not match, so no notes are sent, nothing is claimed and the galaxy holds still. He says plainly that he has nothing on that, sir. |
 
 ## Talk to it
 
@@ -251,9 +308,10 @@ which notes the answer really came from.
 | `tools/harness.mjs` | the headless page harness: DOM, speech and recognition mocks, virtual clock |
 | `tools/verify-voice.mjs` | the voice logic under test: buffers, interrupts, mute, voice choice, status |
 | `tools/verify-provenance.mjs` | the provenance logic under test: fly-to-source, cluster, still, speech length |
+| `server.py` - "THE PERSONA" | the whole character, in one commented block at the top of the file |
 | `tools/browser-voice-check.mjs` | drives the voice layer in a real browser with a speech spy and a fake mic |
 | `tools/browser-provenance-check.mjs` | the real server, the real notes, three questions, three photographs |
-| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `provenance-*.jpg`) |
+| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -290,6 +348,13 @@ npm - which is exactly the situation this project was verified in.
   `stop` bypasses the buffer, that a `?mute=1` tab never touches the speech engine at all, that
   the British voice is preferred and a missing voice list does not break anything, and that a
   browser which never fires `onend` cannot wedge the UI.
+* `tools/verify.py` also checks the persona itself: that the block sits above every function in
+  `server.py`, that the prompts carry the rules the tests depend on, that every hour of the day
+  maps to a part of day, and that the greeting's number is the real note count - including on a
+  three-note vault, so a hardcoded number would fail.
+* `tools/verify-voice.mjs` covers the greeting in the page: shown at load, not a word spoken
+  before the first click, spoken on the click, replaced by the first answer, and silent in a
+  `?mute=1` tab.
 * `tools/verify-provenance.mjs` - what the galaxy does with the notes an answer came from: one
   note flies (and the flight is a real camera tween), three still fly to the best one, four or
   six light the cluster with no camera call at all, small talk and errors move nothing, the

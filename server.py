@@ -30,6 +30,113 @@ from collections import Counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# =========================================================================== #
+#                                                                             #
+#   T H E   P E R S O N A   -   everything about the character lives here     #
+#                                                                             #
+#   Rewrite the character inside this block and nowhere else. Nothing below    #
+#   it knows what Alfred sounds like: the two prompts, the greeting and the    #
+#   names he gives the times of day are all built from the pieces here.        #
+#                                                                             #
+#   The rules the code depends on, whether you keep this butler or replace     #
+#   him entirely:                                                              #
+#     * SYSTEM_PROMPT must keep the phrase "ONLY from those notes" and must    #
+#       still cap the answer at "three sentences" - the tests check both, and  #
+#       the second is what keeps a spoken answer short.                        #
+#     * CHAT_PROMPT must keep "ONE short, friendly sentence" - the tests use   #
+#       it to tell small talk apart from a notes answer at the model.          #
+#     * GREETING keeps {part_of_day} and {count}; {count} is filled in with    #
+#       the number of notes actually indexed, never by hand.                   #
+#                                                                             #
+# =========================================================================== #
+
+# Who he is. The model reads this on every single answer.
+PERSONA = (
+    "You are Alfred, a dry, impeccably polite British butler who has looked after this "
+    "person's affairs for years. You are fond of him, and you would never say so. Your "
+    "wit is dry: never whimsical, never cute, and never at the expense of being right."
+)
+
+# How he answers a question about the notes.
+ANSWER_STYLE = (
+    "How you answer:\n"
+    "- Address him as \"sir\" when it fits - once in a while, not in every sentence. "
+    "Used sparingly it is charming; used constantly it grates.\n"
+    "- Open with ONE short, dry line of wit, then give him the facts. One genuinely "
+    "funny line beats three bland ones. If nothing funny is within reach, be brief "
+    "instead - never force a joke.\n"
+    "- Never recite the note back to him. He wrote it and it is on his screen: give him "
+    "the answer, not the document.\n"
+    "- At most three sentences. Usually two.\n"
+    "- Answer ONLY from those notes. They are your only source of fact.\n"
+    "- If the notes do not cover what he asked, say so plainly and with dignity - "
+    "\"I have nothing on that, sir\" - and then say what nearby thing they do cover, if "
+    "anything does. Never invent a source, never pad, and never dress up a related note "
+    "as the answer to a different question.\n"
+    "- Follow-up questions refer back to the conversation so far."
+)
+
+# How he answers everything else: greetings, thanks, jokes, questions about you, and
+# anything else that is not a question about the notes. No note excerpts are sent with
+# this one and the server reports on_notes: false, so the viewer holds the galaxy
+# perfectly still - small talk must never drag the camera around the graph.
+CHAT_STYLE = (
+    "How you answer:\n"
+    "- This is not a question about his notes: it is a greeting, thanks, a joke, small "
+    "talk, or a question about you. Reply with ONE short, friendly sentence, in "
+    "character. Dry wit welcome.\n"
+    "- Do not invent facts about his notes, his life, or anything else, and do not "
+    "pretend to know things you have not been told. If he asks about his affairs and "
+    "you have no notes for it, say so plainly and with dignity.\n"
+    "- If he asks for a joke, tell one short one."
+)
+
+SYSTEM_PROMPT = PERSONA + "\n\nYou are given numbered excerpts from his notes.\n" + ANSWER_STYLE
+CHAT_PROMPT = PERSONA + "\n\n" + CHAT_STYLE
+
+# ---- the boot greeting ----------------------------------------------------- #
+# "Good evening, sir. 485 notes indexed, all present and accounted for."
+#
+# The count is never written by hand: greeting() is called with len(state.notes), the
+# number of notes the galaxy is actually holding, and verify.py checks that this is the
+# same number the viewer draws as nodes.
+GREETING = "Good {part_of_day}, sir. {count} notes indexed, all present and accounted for."
+GREETING_ONE = "Good {part_of_day}, sir. One note indexed, all present and accounted for."
+
+# What he calls each part of the day, and when. A butler does not wish you good night at
+# midnight; he wishes you good evening and means it, so the small hours stay "evening".
+# The windows cover all 24 hours exactly once (the last one wraps past midnight).
+PARTS_OF_DAY = (
+    (5, 12, "morning"),
+    (12, 17, "afternoon"),
+    (17, 23, "evening"),
+    (23, 5, "evening"),
+)
+
+
+def part_of_day(hour):
+    """'morning' | 'afternoon' | 'evening' for a 0-23 hour."""
+    hour = int(hour) % 24
+    for start, end, name in PARTS_OF_DAY:
+        if start < end:
+            if start <= hour < end:
+                return name
+        elif hour >= start or hour < end:           # the window that wraps midnight
+            return name
+    return "evening"
+
+
+def greeting(count, hour=None):
+    """The line he opens with, built from the real note count."""
+    hour = time.localtime().tm_hour if hour is None else hour
+    template = GREETING_ONE if int(count) == 1 else GREETING
+    return template.format(part_of_day=part_of_day(hour), count=int(count))
+
+
+# =========================================================================== #
+#   end of the persona - below here is machinery, not character               #
+# =========================================================================== #
+
 # --------------------------------------------------------------------------- #
 # paths / defaults
 # --------------------------------------------------------------------------- #
@@ -61,27 +168,6 @@ SUPPORT_RATIO = 0.4
 MAX_BODY = 64 * 1024
 REQUEST_TIMEOUT = 60
 
-SYSTEM_PROMPT = (
-    "You are Alfred, the brain of a personal knowledge galaxy built from one person's "
-    "markdown notes. You are given numbered excerpts from their notes, and you answer "
-    "ONLY from those notes. Answer in two or three sentences, in plain prose, no bullet "
-    "points and no preamble. Use the notes' own facts, names, numbers and dates. If the "
-    "notes do not cover what was asked, say so plainly - for example \"Your notes do not "
-    "cover that\" - and then say what they do cover if anything nearby is relevant. Never "
-    "invent details, and never use outside knowledge. Follow-up questions refer back to "
-    "the conversation so far."
-)
-
-# Used instead of SYSTEM_PROMPT when the question was not about the notes. No note
-# excerpts are sent at all in that case - there is nothing in them to answer with.
-CHAT_PROMPT = (
-    "You are Alfred, the brain of a personal knowledge galaxy built from one person's "
-    "markdown notes. The user has said something that is not a question about their "
-    "notes - a greeting, thanks, a joke, small talk, or a question about you. Reply in "
-    "ONE short, friendly sentence. Do not invent facts about their notes, their life or "
-    "anything else, and do not pretend to know things you have not been told. If they "
-    "ask for a joke, tell one short joke."
-)
 
 # Phrases that are small talk rather than questions about the notes. They only take
 # effect when the notes also fail to match (see about_my_notes) - "thanks, what is the
@@ -487,11 +573,14 @@ class State:
     def model(self):
         return (self.cfg.get("model") or PLACEHOLDER_MODEL).strip()
 
-    def health(self):
+    def health(self, hour=None):
         groups = sorted({n["group"] for n in self.notes})
         return {
             "ok": True,
             "notes": len(self.notes),
+            # the boot greeting, with the real note count in it. The viewer asks for
+            # ?hour=<its own local hour> so the salutation matches the reader's clock.
+            "greeting": greeting(len(self.notes), hour),
             "notes_source": self.source,
             "notes_dir": self.notes_dir,
             "groups": groups,
@@ -545,7 +634,11 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, head_only=False):
         path = urllib.parse.urlparse(self.path).path
         if path in ("/health", "/healthz", "/api/health"):
-            return self._json(HTTPStatus.OK, self.state.health(), head_only)
+            hour = None
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if query.get("hour", [""])[0].isdigit():
+                hour = int(query["hour"][0]) % 24
+            return self._json(HTTPStatus.OK, self.state.health(hour), head_only)
         if path == "/chat":
             return self._error(HTTPStatus.METHOD_NOT_ALLOWED,
                                "GET /chat is not supported - POST a JSON body with your question.",

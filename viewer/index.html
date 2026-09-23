@@ -161,6 +161,7 @@
   }
   .src:hover{color:var(--ink); border-color:rgba(255,255,255,.25)}
   .src.primary{color:var(--ink); border-color:rgba(123,255,196,.45); background:rgba(123,255,196,.07)}
+  #answer-text.greeting{color:var(--dim); font-style:italic}
   .src i{width:6px;height:6px;border-radius:50%;font-style:normal}
   .src .idx{font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
   .a-foot{padding:0 16px 12px; font-family:var(--mono); font-size:10px; color:var(--dimmer)}
@@ -984,15 +985,23 @@ async function boot3d(){
     setTimeout(verifyRender, 900);
   });
 
-  // tell the user straight away if the brain has no key yet
-  fetch('/health').then(r => r.ok ? r.json() : null).then(h => {
-    if (!h || !h.key || h.key.state === 'set') return;
-    const note = $('key-note');
-    if (!note) return;
-    note.textContent = h.key.state === 'missing'
-      ? 'No API key in config.json - the galaxy works, the brain is asleep.'
-      : 'config.json still holds the placeholder key - paste your real one and restart server.py to wake the brain.';
-    note.hidden = false;
+  // one call to /health does three things: it greets you, it warns about the key, and
+  // it is how the page knows how many notes the galaxy is holding. The hour is sent
+  // from HERE, because the browser's clock is the one the person reading this is
+  // living by - the salutation is composed server-side (see THE PERSONA in server.py)
+  // but the time of day comes from the person being greeted.
+  fetch('/health?hour=' + new Date().getHours()).then(r => r.ok ? r.json() : null).then(h => {
+    if (!h) return;
+    if (h.greeting) greet(h.greeting);
+    if (h.key && h.key.state !== 'set'){
+      const note = $('key-note');
+      if (note){
+        note.textContent = h.key.state === 'missing'
+          ? 'No API key in config.json - the galaxy works, the brain is asleep.'
+          : 'config.json still holds the placeholder key - paste your real one and restart server.py to wake the brain.';
+        note.hidden = false;
+      }
+    }
   }).catch(() => {});
 
   // fade the boot overlay out as soon as we have actually drawn frames
@@ -1023,6 +1032,7 @@ async function boot3d(){
                          interrupt: interruptNow, finish: finishAndSend
                        }
                      },
+                     greeting: () => ({shown: greeted, text: greeted ? answerText.textContent : ''}),
                      // what the galaxy showed of where the last answer came from
                      provenance: {
                        FLY_MAX: PROVENANCE_FLY_MAX, SPEAK_MAX_CHARS,
@@ -1476,6 +1486,24 @@ const answerBox = $('answer'), answerText = $('answer-text'),
       answerSrc = $('answer-sources'), answerFoot = $('a-foot'), answerModel = $('a-model');
 
 function showAnswer(){ answerBox.hidden = false; }
+
+/* The boot greeting: the line comes from the server (persona + the real note count),
+   and it is spoken like anything else - which means before the first click it waits in
+   pendingSpeech and is heard the moment the page is touched, and in a ?mute=1 tab it is
+   never spoken at all. It is shown straight away either way. */
+let greeted = false;
+function greet(line){
+  const text = String(line || '').trim();
+  if (!text || greeted) return;
+  greeted = true;
+  answerText.className = 'greeting';
+  answerText.textContent = text;
+  answerSrc.innerHTML = '';
+  answerModel.textContent = '';
+  answerFoot.textContent = 'ready when you are';
+  showAnswer();
+  speak(text);
+}
 function thinking(){
   answerText.className = 'thinking';
   answerText.textContent = 'reading your notes…';
