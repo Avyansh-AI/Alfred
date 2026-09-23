@@ -165,7 +165,7 @@ def main():
     print("  python       : %s" % sys.version.split()[0])
 
     # ------------------------------------------------------------------ build
-    print("\n[1/6] indexer")
+    print("\n[1/7] indexer")
     build = subprocess.run([PY, os.path.join(ROOT, "build.py"), "--check", "--quiet"],
                            cwd=ROOT, capture_output=True, text=True)
     check(build.returncode == 0, "build.py --check exits cleanly: %s" % (build.stdout.strip() or build.stderr.strip()))
@@ -205,7 +205,7 @@ def main():
         return 1
 
     # ------------------------------------------------------------------ server
-    print("\n[2/6] server + static files")
+    print("\n[2/7] server + static files")
     port = args.port or 4700
     if request("http://127.0.0.1:%d/" % port, timeout=1)[0] is not None:
         if args.port:
@@ -251,7 +251,7 @@ def main():
         check("sk-stub" not in body, "/health never echoes the key itself")
 
         # everything outside viewer/ must be unreachable
-        print("\n[3/6] the server serves only viewer/")
+        print("\n[3/7] the server serves only viewer/")
         for path in ["/../config.json", "/%2e%2e/config.json", "/../server.py", "/../build.py",
                      "/..%2fconfig.json", "/../.git/config"]:
             status, _, body = request(base + path)
@@ -283,7 +283,7 @@ def main():
               "HEAD / works (proxies and previews need it)")
 
         # ----------------------------------------------------------------- brain
-        print("\n[4/6] the brain, with a stubbed OpenAI")
+        print("\n[4/7] the brain, with a stubbed OpenAI")
         status, _, body = request(base + "/chat")
         check(status == 405, "GET /chat is a clean 405, not a crash (got %s)" % status)
         status, _, body = request(base + "/chat", method="POST", payload=None)
@@ -348,8 +348,60 @@ def main():
 
         check(proc.poll() is None, "the server is still alive after all of that")
 
+        # ------------------------------------------------------------ provenance
+        print("\n[5/7] provenance: does the server know when a question was about the notes?")
+        def ask_prov(q):
+            st, _, bd = request(base + "/chat", method="POST", payload={"question": q})
+            try:
+                return st, json.loads(bd)
+            except ValueError:
+                return st, {}
+
+        st, d = ask_prov("what is the budget for the move?")
+        check(d.get("on_notes") is True and d.get("decision") == "notes",
+              "a question about the notes is decided as such before anything moves: %s" % d.get("decision"))
+        one = [graph["nodes"][i]["label"] for i in d.get("nodes") or []]
+        check(one == ["Budget for the Move"], "exactly one note carries that answer: %s" % one)
+        check(len(d.get("read") or []) == 6, "while the model was still shown six: read=%s" % d.get("read"))
+        check(set(d.get("nodes") or []) <= set(d.get("read") or []),
+              "the notes it came from are a subset of the notes it read")
+        check([x["label"] for x in d.get("sources") or []] == one,
+              "sources[] names the same notes, with their scores")
+
+        st, broad = ask_prov("what should I pack and prepare before moving, and what is the budget?")
+        check(broad.get("on_notes") is True and len(broad.get("nodes") or []) >= 4,
+              "a broad question comes back with a cluster of %d notes: %s"
+              % (len(broad.get("nodes") or []), [graph["nodes"][i]["label"] for i in broad.get("nodes") or []]))
+        narrow_idx = (d.get("nodes") or [None])[0]
+        check(narrow_idx in (broad.get("nodes") or []) and len(broad.get("nodes") or []) >= 4,
+              "the same note is inside the broad answer's cluster, which claims %d sources instead of 1"
+              % len(broad.get("nodes") or []))
+
+        st, g = ask_prov("good morning")
+        check(g.get("on_notes") is False and g.get("decision") == "small_talk",
+              "a greeting is small talk, not a question about the notes: %s" % g.get("decision"))
+        check(g.get("nodes") == [] and g.get("read") == [],
+              "so it claims no sources and reads no notes: nodes=%s read=%s" % (g.get("nodes"), g.get("read")))
+        check(str(g.get("answer") or "").startswith("STUB ANSWER"), "and is still answered")
+        small_talk_body = json.dumps(stub.calls[-1]["body"])
+        check("Notes from the user's knowledge galaxy" not in small_talk_body,
+              "no note excerpts were sent to the model for small talk")
+        check("ONE short, friendly sentence" in small_talk_body,
+              "small talk gets its own prompt instead of the notes one")
+
+        st, j = ask_prov("tell me a joke")
+        check(j.get("on_notes") is False and j.get("decision") == "small_talk", "a joke request is small talk too")
+        st, who = ask_prov("who are you?")
+        check(who.get("on_notes") is False and who.get("decision") == "small_talk", "so is \"who are you?\"")
+
+        st, dep = ask_prov("and what about the deposit?")
+        check(dep.get("on_notes") is True and dep.get("decision") == "follow_up",
+              "a vague question after a notes turn is a follow-up, not small talk: %s" % dep.get("decision"))
+        check("Notes from the user's knowledge galaxy" in json.dumps(stub.calls[-1]["body"]),
+              "and it still gets the notes, so follow-ups keep working")
+
         # ------------------------------------------------- placeholder-key path
-        print("\n[5/6] placeholder key")
+        print("\n[6/7] placeholder key")
         ph_dir = tempfile.mkdtemp(prefix="alfred-ph-")
         ph_cfg = os.path.join(ph_dir, "config.json")
         ph_port = free_port()
@@ -372,7 +424,17 @@ def main():
                 break
             time.sleep(0.1)
         status, _, body = request("http://127.0.0.1:%d/chat" % ph_port, method="POST",
-                                  payload={"question": "anything at all"})
+                                  payload={"question": "what is the capital of France?"})
+        try:
+            off = json.loads(body)
+        except ValueError:
+            off = {}
+        check(off.get("on_notes") is False and off.get("decision") == "no_match",
+              "an off-topic first question is not a notes question: %s" % off.get("decision"))
+        check(off.get("nodes") == [], "and it claims no sources: %s" % off.get("nodes"))
+
+        status, _, body = request("http://127.0.0.1:%d/chat" % ph_port, method="POST",
+                                  payload={"question": "what is the budget for the move?"})
         check(status == 200, "POST /chat with the placeholder key answers 200 (no crash, got %s)" % status)
         try:
             ph = json.loads(body)
@@ -383,7 +445,10 @@ def main():
               "it returns a clean placeholder-key error: %r" % (ph.get("error") or "")[:80])
         check("config.json" in (ph.get("hint") or ""), "the error tells the user exactly what to fix: %r" % (ph.get("hint") or "")[:90])
         check(isinstance(ph.get("nodes"), list) and len(ph["nodes"]) > 0,
-              "retrieval still works without a key - the matching notes come back: %s" % ph.get("nodes"))
+              "retrieval still works without a key - the matching note comes back: %s" % ph.get("nodes"))
+        check(ph.get("on_notes") is True and len(ph.get("read") or []) == 6,
+              "and the error still reports the decision and the six notes it would have read: %s"
+              % ph.get("read"))
         check(len(stub.calls) == 0 or True, "no upstream call was attempted with a placeholder key")
         check(proc2.poll() is None, "the server survived the placeholder-key request")
         proc2.terminate()
@@ -401,7 +466,7 @@ def main():
         stub.shutdown()
 
     # ------------------------------------------------------------------ report
-    print("\n[6/6] summary")
+    print("\n[7/7] summary")
     fails = [m for state, m in results if state == "FAIL"]
     print("  %d checks, %d passed, %d failed" % (len(results), len(results) - len(fails), len(fails)))
     if fails:

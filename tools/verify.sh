@@ -19,6 +19,9 @@ if command -v node >/dev/null 2>&1; then node tools/verify.mjs | tail -6; mark $
 step "voice logic: speaking, listening, the finish window, ?mute=1 (node tools/verify-voice.mjs)"
 if command -v node >/dev/null 2>&1; then node tools/verify-voice.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
 
+step "provenance logic: does the galaxy show where an answer came from (node tools/verify-provenance.mjs)"
+if command -v node >/dev/null 2>&1; then node tools/verify-provenance.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
+
 step "server + brain end-to-end (python3 tools/verify.py)"
 python3 tools/verify.py | tail -8; mark ${PIPESTATUS[0]}
 
@@ -35,6 +38,12 @@ else
 
   step "real browser voice check: spoken answers, mic, pause window, mute tab (node tools/browser-voice-check.mjs)"
   node tools/browser-voice-check.mjs 2>&1 | tail -14
+  code=${PIPESTATUS[0]}
+  [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
+  mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
+
+  step "real browser provenance: one note flies, a cluster lights, small talk holds still"
+  node tools/browser-provenance-check.mjs 2>&1 | tail -18
   code=${PIPESTATUS[0]}
   [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
   mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
