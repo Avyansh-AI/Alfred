@@ -319,7 +319,9 @@ def main():
 
         for probe, expect in [("budget for the move", "Budget for the Move"),
                               ("packing", "Packing Stuff"),
-                              ("vande bharat", "Vande Bharat Train")]:
+                              ("booking train", "Booking Train to Ayodhya"),
+                              ("vande bharat", "Booking Train to Ayodhya"),   # matched from the note body
+                              ("internet", "Internet and Electricity in Ayodhya")]:
             status, _, body = request(base + "/chat", method="POST", payload={"question": probe})
             d = json.loads(body)
             labels = [graph["nodes"][i]["label"] for i in d["nodes"]]

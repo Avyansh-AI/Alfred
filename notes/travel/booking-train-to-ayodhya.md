@@ -1,6 +1,6 @@
-# Vande Bharat Train
+# Booking Train to Ayodhya
 
-Booked the Vande Bharat from Ambala to Ayodhya via Delhi for the 30th, chair car, window pair on the left side. Two large suitcases, one cabin bag and my laptop sleeve - that is the entire allowance we are using.
+Booked the Vande Bharat from Ambala to Ayodhya via Delhi for the 30th, chair car, window pair on the left side. Booking notes in case I have to do this again: Tatkal opens at 10:00 the previous day and the 3AC fills last, so if the chair car is gone I take 3AC and stop worrying. Two large suitcases, one cabin bag and my laptop sleeve - that is the entire allowance we are using.
 
 Timings that matter: leave home by 5:10 am for the Ambala Cantt drop, breakfast at the Delhi halt is a 40 minute window so we carry parathas instead of buying, and we land in Ayodhya by late afternoon. Total door-to-door is about 12 hours.
 

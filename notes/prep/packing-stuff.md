@@ -2,7 +2,7 @@
 
 Rule we are sticking to: pack by room, label every box with a number and a room, and keep one "open first" box that does not go into the truck.
 
-Phase 1 - things we will not need until after we land: winter clothes, extra utensils, the second set of bedsheets, all the photo albums. Phase 2 - kitchen and study. Phase 3 - daily use, medicines and documents, which travel with us in the [[Vande Bharat Train]] cabin bag.
+Phase 1 - things we will not need until after we land: winter clothes, extra utensils, the second set of bedsheets, all the photo albums. Phase 2 - kitchen and study. Phase 3 - daily use, medicines and documents, which travel with us in the [[Booking Train to Ayodhya]] cabin bag.
 
 Boxes so far: 6 large, 9 medium, 4 small. Bubble wrap is doing most of the work. The pressure cooker and the mixer are going in their original cartons with towels stuffed around them.
 
