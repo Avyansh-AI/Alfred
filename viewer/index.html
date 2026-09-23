@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Alfred &middot; Knowledge Galaxy</title>
+<meta name="description" content="A 3D knowledge galaxy of your markdown notes, with a brain you can talk to.">
+<style>
+  :root{
+    --void:#03040a;
+    --ink:#e9edf7;
+    --dim:#8b95ad;
+    --dimmer:#5b6478;
+    --line:rgba(255,255,255,.09);
+    --glass:rgba(10,14,26,.72);
+    --glass-hi:rgba(20,26,44,.86);
+    --accent:#6ee7ff;
+    --warn:#ffc46b;
+    --bad:#ff8f8f;
+    --ok:#7bffc4;
+    --r:14px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--void); color:var(--ink); font-family:var(--font);
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  #stage{position:fixed; inset:0}
+  #stage canvas{display:block}
+  /* cinematic vignette + subtle colour grade over the 3D layer */
+  #grade{
+    position:fixed; inset:0; pointer-events:none; z-index:2;
+    background:
+      radial-gradient(120% 90% at 50% 45%, rgba(0,0,0,0) 42%, rgba(0,0,0,.55) 100%),
+      linear-gradient(180deg, rgba(10,16,40,.35) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,0) 70%, rgba(6,10,24,.5) 100%);
+  }
+  /* the library's hover tooltip arrives as .float-tooltip-kap */
+  .float-tooltip-kap{
+    font-family:var(--font)!important; font-size:12px!important; line-height:1.5!important;
+    color:var(--ink)!important; background:var(--glass-hi)!important;
+    border:1px solid var(--line)!important; padding:7px 11px!important;
+    border-radius:10px!important; backdrop-filter:blur(8px);
+    box-shadow:0 10px 30px rgba(0,0,0,.5)!important; letter-spacing:.2px;
+  }
+  .float-tooltip-kap b{font-weight:600}
+  .float-tooltip-kap span{color:var(--dim)}
+
+  /* ---------- top-left HUD ---------- */
+  #hud{
+    position:fixed; top:18px; left:18px; z-index:5; max-width:min(360px,46vw);
+    padding:14px 16px 13px; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--glass); backdrop-filter:blur(12px);
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  #hud h1{
+    margin:0; font-size:13px; font-weight:600; letter-spacing:.22em; text-transform:uppercase;
+  }
+  #hud h1 em{font-style:normal;color:var(--accent)}
+  #stats{margin:6px 0 0; font-size:11.5px; color:var(--dim); letter-spacing:.03em}
+  #status{
+    display:inline-flex; align-items:center; gap:6px; margin-top:9px;
+    font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:3px 9px;
+  }
+  #status .dot{width:6px;height:6px;border-radius:50%;background:var(--dim)}
+  #status.live .dot{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  #status.bad .dot{background:var(--bad); box-shadow:0 0 8px var(--bad)}
+  #legend{display:flex; flex-wrap:wrap; gap:6px; margin-top:11px}
+  .chip{
+    display:inline-flex; align-items:center; gap:6px; cursor:pointer;
+    font-size:11px; color:var(--dim); border:1px solid var(--line); border-radius:999px;
+    padding:3px 9px; background:rgba(255,255,255,.02); transition:.18s; user-select:none;
+  }
+  .chip:hover{color:var(--ink); border-color:rgba(255,255,255,.22)}
+  .chip.on{color:var(--ink); border-color:rgba(255,255,255,.3); background:rgba(255,255,255,.06)}
+  .chip i{width:7px;height:7px;border-radius:50%; display:inline-block; font-style:normal}
+  .chip .n{color:var(--dimmer)}
+  #hint{margin-top:10px; font-size:10.5px; color:var(--dimmer); line-height:1.5}
+  #key-note{margin-top:9px; font-size:10.5px; color:var(--warn); line-height:1.5}
+  #key-note[hidden]{display:none}
+  kbd{
+    font-family:var(--mono); font-size:10px; border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:5px; padding:1px 4px; color:var(--dim);
+  }
+
+  /* ---------- side panel ---------- */
+  #panel{
+    position:fixed; top:0; right:0; z-index:6; height:100%; width:min(390px,92vw);
+    background:linear-gradient(180deg, rgba(9,12,24,.95), rgba(6,9,18,.97));
+    border-left:1px solid var(--line); backdrop-filter:blur(14px);
+    transform:translateX(102%); transition:transform .5s cubic-bezier(.16,.8,.24,1);
+    display:flex; flex-direction:column; box-shadow:-30px 0 70px rgba(0,0,0,.5);
+  }
+  #panel.open{transform:none}
+  #panel-head{padding:20px 22px 14px; border-bottom:1px solid var(--line)}
+  #panel-close{
+    position:absolute; top:14px; right:14px; width:30px; height:30px; border-radius:8px; cursor:pointer;
+    background:rgba(255,255,255,.04); border:1px solid var(--line); color:var(--dim);
+    font-size:15px; line-height:1; display:grid; place-items:center; transition:.18s;
+  }
+  #panel-close:hover{color:var(--ink); background:rgba(255,255,255,.09)}
+  #panel-label{margin:0 34px 0 0; font-size:19px; font-weight:600; letter-spacing:-.01em; line-height:1.25}
+  #panel-group{margin-top:9px; display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--dim)}
+  #panel-group i{width:8px;height:8px;border-radius:50%;display:inline-block}
+  #panel-group code{font-family:var(--mono); font-size:10.5px; color:var(--dimmer)}
+  #panel-body{padding:18px 22px 26px; overflow-y:auto; flex:1}
+  #panel-excerpt{
+    font-size:13.5px; line-height:1.72; color:#c6cddd; white-space:pre-wrap;
+    border-left:2px solid rgba(110,231,255,.35); padding-left:14px; margin:0;
+  }
+  .p-section{margin-top:22px}
+  .p-title{
+    font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--dimmer); margin-bottom:9px;
+  }
+  #panel-neighbours{display:flex; flex-direction:column; gap:6px}
+  .neigh{
+    display:flex; align-items:center; gap:9px; cursor:pointer; text-align:left;
+    background:rgba(255,255,255,.025); border:1px solid var(--line); border-radius:10px;
+    padding:8px 11px; color:var(--dim); font-size:12.5px; font-family:var(--font); transition:.18s;
+  }
+  .neigh:hover{color:var(--ink); background:rgba(255,255,255,.07); transform:translateX(2px)}
+  .neigh i{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+  .neigh .kind{margin-left:auto; font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
+  #panel-meta{
+    margin-top:22px; padding-top:14px; border-top:1px solid var(--line);
+    font-family:var(--mono); font-size:10.5px; color:var(--dimmer); line-height:1.7;
+  }
+
+  /* ---------- ask bar ---------- */
+  #ask-wrap{
+    position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:7;
+    width:min(760px,calc(100vw - 36px)); display:flex; flex-direction:column; gap:10px;
+  }
+  #answer{
+    border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
+    background:var(--glass); backdrop-filter:blur(12px); box-shadow:0 18px 50px rgba(0,0,0,.5);
+  }
+  #answer[hidden]{display:none}
+  .a-head{
+    display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line);
+    font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--dimmer);
+  }
+  .a-head .who{color:var(--accent)}
+  .a-head button{
+    margin-left:auto; background:none; border:0; color:var(--dimmer); cursor:pointer;
+    font-size:14px; line-height:1; padding:2px 4px;
+  }
+  .a-head button:hover{color:var(--ink)}
+  #answer-text{padding:14px 16px; font-size:13.5px; line-height:1.7; color:#d5dbe8; white-space:pre-wrap}
+  #answer-text.thinking{color:var(--dim); font-style:italic}
+  #answer-text.error{color:var(--warn)}
+  #answer-sources{display:flex; flex-wrap:wrap; gap:6px; padding:0 16px 14px}
+  #answer-sources:empty{display:none}
+  .src{
+    display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:11px; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:3px 10px; background:rgba(255,255,255,.03);
+    font-family:var(--font); transition:.18s;
+  }
+  .src:hover{color:var(--ink); border-color:rgba(255,255,255,.25)}
+  .src i{width:6px;height:6px;border-radius:50%;font-style:normal}
+  .src .idx{font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
+  .a-foot{padding:0 16px 12px; font-family:var(--mono); font-size:10px; color:var(--dimmer)}
+  #ask-form{
+    display:flex; align-items:center; gap:10px; padding:9px 9px 9px 16px;
+    border:1px solid var(--line); border-radius:999px; background:var(--glass);
+    backdrop-filter:blur(12px); box-shadow:0 18px 50px rgba(0,0,0,.55);
+    transition:border-color .2s, box-shadow .2s;
+  }
+  #ask-form:focus-within{border-color:rgba(110,231,255,.45); box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 4px rgba(110,231,255,.07)}
+  #ask-form .sig{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);flex:0 0 auto}
+  #q{
+    flex:1; background:none; border:0; outline:0; color:var(--ink); font-size:14px;
+    font-family:var(--font); padding:7px 0; min-width:0;
+  }
+  #q::placeholder{color:var(--dimmer)}
+  #send{
+    flex:0 0 auto; border:1px solid rgba(110,231,255,.3); background:rgba(110,231,255,.1);
+    color:var(--accent); font-family:var(--font); font-size:12.5px; font-weight:600; letter-spacing:.04em;
+    padding:9px 18px; border-radius:999px; cursor:pointer; transition:.18s;
+  }
+  #send:hover:not(:disabled){background:rgba(110,231,255,.2)}
+  #send:disabled{opacity:.45; cursor:progress}
+
+  /* ---------- boot / error ---------- */
+  #boot{
+    position:fixed; inset:0; z-index:20; display:grid; place-content:center; gap:14px; text-align:center;
+    background:radial-gradient(60% 50% at 50% 50%, #070b18 0%, #03040a 100%);
+    transition:opacity .7s ease; padding:24px;
+  }
+  #boot.gone{opacity:0; pointer-events:none}
+  #boot .mark{font-size:12px; letter-spacing:.3em; text-transform:uppercase; color:var(--accent)}
+  #boot .msg{font-size:13px; color:var(--dim); max-width:520px; line-height:1.6}
+  #boot .orb{
+    width:52px;height:52px;margin:0 auto 6px;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%, #9df1ff, #2b6cff 55%, #3a1b7a);
+    box-shadow:0 0 42px rgba(110,231,255,.5); animation:pulse 2.6s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{transform:scale(1);opacity:.92}50%{transform:scale(1.09);opacity:1}}
+  #boot code{font-family:var(--mono); font-size:12px; color:var(--warn); background:rgba(255,196,107,.08);
+    border:1px solid rgba(255,196,107,.2); border-radius:6px; padding:2px 6px}
+  .spin{display:inline-block; animation:spin 3.4s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  @media (max-width:720px){
+    #hud{max-width:none; right:18px; top:12px; left:12px; padding:11px 13px}
+    #legend{display:none}
+    #hint{display:none}
+    #ask-wrap{bottom:14px; width:calc(100vw - 24px)}
+    #stage{inset:0}
+  }
+</style>
+</head>
+<body>
+
+<div id="stage"></div>
+<div id="grade"></div>
+
+<!-- HUD -->
+<div id="hud">
+  <h1>Alfred <em>&middot;</em> Knowledge Galaxy</h1>
+  <p id="stats">booting&hellip;</p>
+  <div id="status"><span class="dot"></span><span id="status-text">starting renderer</span></div>
+  <div id="legend"></div>
+  <div id="hint">
+    drag to orbit &middot; scroll to zoom &middot; click a star for its note &middot; <kbd>/</kbd> to ask
+  </div>
+  <div id="key-note" hidden></div>
+</div>
+
+<!-- side panel -->
+<aside id="panel" aria-hidden="true" aria-label="Note detail">
+  <button id="panel-close" title="Close (Esc)" aria-label="Close">&#10005;</button>
+  <div id="panel-head">
+    <h2 id="panel-label">&nbsp;</h2>
+    <div id="panel-group"></div>
+  </div>
+  <div id="panel-body">
+    <div class="p-section" style="margin-top:0">
+      <div class="p-title">Excerpt</div>
+      <p id="panel-excerpt"></p>
+    </div>
+    <div class="p-section">
+      <div class="p-title" id="neigh-title">Connected notes</div>
+      <div id="panel-neighbours"></div>
+    </div>
+    <div id="panel-meta"></div>
+  </div>
+</aside>
+
+<!-- ask bar -->
+<div id="ask-wrap">
+  <div id="answer" hidden>
+    <div class="a-head"><span class="who" id="a-who">Alfred</span><span id="a-model"></span>
+      <button id="a-close" title="Dismiss" aria-label="Dismiss">&#10005;</button></div>
+    <div id="answer-text"></div>
+    <div id="answer-sources"></div>
+    <div class="a-foot" id="a-foot"></div>
+  </div>
+  <form id="ask-form" autocomplete="off">
+    <span class="sig"></span>
+    <input id="q" type="text" placeholder="Ask your notes&hellip;" aria-label="Ask your notes" maxlength="500">
+    <button id="send" type="submit">Ask</button>
+  </form>
+</div>
+
+<!-- boot overlay -->
+<div id="boot">
+  <div class="orb"></div>
+  <div class="mark">Alfred</div>
+  <div class="msg" id="boot-msg">Igniting the galaxy&hellip;</div>
+</div>
+
+<script src="graph-data.js"></script>
+<script type="module">
+/* ============================================================================
+   Alfred - knowledge galaxy viewer
+   No npm, no build step, no framework. Everything below is plain ES modules +
+   the 3d-force-graph bundle from a CDN.
+   ========================================================================== */
+
+const CFG = {
+  // pinned: the bundle is built against three r183 and reuses window.THREE when
+  // it is already defined, so we hand it its own exact revision.
+  three: 'https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.min.js',
+  graph: [
+    'https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.0/dist/3d-force-graph.min.js',
+    'https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js'
+  ],
+  idleDelay: 7000,       // ms of no interaction before the slow drift resumes
+  flyMs: 1300,
+  haloScale: 7.2,
+  nodeRelSize: 2.1
+};
+
+const $ = (id) => document.getElementById(id);
+const stage = $('stage');
+const boot = $('boot');
+const bootMsg = $('boot-msg');
+
+/* ---------------------------------------------------------------- utilities */
+const PALETTE = ['#5ee7ff','#a98bff','#ffb45c','#5cffc0','#ff6ea9','#d4ff5c',
+                 '#7db8ff','#ff8f6e','#4fd8c8','#ffd76e','#8f9dff','#ff7bd5'];
+
+function groupColors(nodes){
+  const groups = [...new Set(nodes.map(n => n.group || 'notes'))].sort();
+  const map = {};
+  groups.forEach((g,i) => map[g] = PALETTE[i % PALETTE.length]);
+  return map;
+}
+function hexToRgb(hex){
+  const h = hex.replace('#','');
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+function mix(hex, target, t){
+  const a = hexToRgb(hex), b = hexToRgb(target);
+  return '#' + a.map((v,i)=> Math.round(v + (b[i]-v)*t).toString(16).padStart(2,'0')).join('');
+}
+const dim = (hex) => mix(hex, '#1b2233', 0.72);   // dimmed = pulled toward the void
+const hot = (hex) => mix(hex, '#ffffff', 0.42);   // lit = pulled toward white
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function loadScript(urls){
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    const next = () => {
+      if (i >= urls.length) return reject(new Error('all CDN sources failed'));
+      const s = document.createElement('script');
+      s.src = urls[i++];
+      s.async = false;
+      s.onload = () => resolve(s.src);
+      s.onerror = () => { s.remove(); next(); };
+      document.head.appendChild(s);
+    };
+    next();
+  });
+}
+
+/* --------------------------------------------------------------- graph data */
+const GRAPH = (typeof window.GRAPH !== 'undefined' && window.GRAPH) || {nodes:[], links:[]};
+const NODES = GRAPH.nodes || [];
+const LINKS = GRAPH.links || [];
+
+if (!NODES.length){
+  boot.classList.remove('gone');
+  bootMsg.innerHTML = 'No notes indexed yet. Run <code>python3 build.py</code> to write ' +
+                      '<code>viewer/graph-data.js</code>, then reload.';
+  $('stats').textContent = 'empty galaxy';
+  throw new Error('no graph data');
+}
+
+// links arrive as indexes -> resolve to node objects once, keep both views
+const byIndex = new Map(NODES.map((n,i) => [n.index != null ? n.index : i, n]));
+const linkObjs = [];
+const adj = new Map(NODES.map(n => [n.id, []]));
+LINKS.forEach(l => {
+  const s = byIndex.get(l.source), t = byIndex.get(l.target);
+  if (!s || !t) return;
+  const link = {source: s, target: t, kind: l.kind || 'link', weight: l.weight || 1};
+  linkObjs.push(link);
+  adj.get(s.id).push({node: t, link});
+  adj.get(t.id).push({node: s, link});
+});
+const COLORS = groupColors(NODES);
+const nodesById = new Map(NODES.map(n => [n.id, n]));
+
+/* --------------------------------------------------------------- 3d layer */
+let Graph = null, THREE = null, camera = null, controls = null;
+let halos = new Map();          // node id -> halo sprite
+let starfield = null, core = null;
+let camRadius = 420;            // camera distance from the centre, set after layout
+let litIds = new Set(), litPair = new Set();
+let selected = null;            // currently focused node
+let hoveredId = null;
+let domainNodes = null;         // set when filtering by group
+
+/* -- sprites are built from tiny canvases so we need no extra assets -------- */
+function radialTexture(stops, size = 128){
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  stops.forEach(([at, color]) => g.addColorStop(at, color));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+function starTexture(){
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(16,16,0,16,16,16);
+  g.addColorStop(0,'rgba(255,255,255,1)');
+  g.addColorStop(0.35,'rgba(255,255,255,.75)');
+  g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(0,0,32,32);
+  return new THREE.CanvasTexture(c);
+}
+
+function makeStarfield(count = 5200){
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+  for (let i = 0; i < count; i++){
+    // uniform shell, so stars never bunch at the poles
+    const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+    const r = 900 + Math.pow(Math.random(), 0.6) * 2600;
+    const s = Math.sqrt(1 - u * u);
+    pos[i*3] = r * s * Math.cos(th);
+    pos[i*3+1] = r * u;
+    pos[i*3+2] = r * s * Math.sin(th);
+    const warm = Math.random();
+    c.setHSL(warm < 0.72 ? 0.58 : (warm < 0.9 ? 0.09 : 0.78), 0.45, 0.72 + Math.random() * 0.25);
+    const k = 0.35 + Math.random() * 0.65;
+    col[i*3] = c.r * k; col[i*3+1] = c.g * k; col[i*3+2] = c.b * k;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 2.1,
+    sizeAttenuation: false,        // pixel-sized: identical on every zoom level
+    map: starTexture(),
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  pts.renderOrder = -2;
+  return pts;
+}
+
+function makeCoreGlow(){
+  const g = new THREE.Group();
+  const tex = radialTexture([[0,'rgba(255,255,255,.85)'],[0.25,'rgba(160,190,255,.35)'],[1,'rgba(0,0,0,0)']], 256);
+  [[0x2b6cff, 640, .16, [0,0,-120]], [0x7a3cff, 900, .12, [140,-90,180]]].forEach(([hex, scale, opacity, p]) => {
+    const mat = new THREE.SpriteMaterial({
+      map: tex, color: hex, transparent: true, opacity,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    const s = new THREE.Sprite(mat);
+    s.scale.set(scale, scale, 1);
+    s.position.set(p[0], p[1], p[2]);
+    s.renderOrder = -1;
+    g.add(s);
+  });
+  return g;
+}
+
+const nodeVal = (n) => 2.6 + Math.min(3.4, (n.words || 40) / 90);
+const sphereR = (n) => CFG.nodeRelSize * Math.cbrt(nodeVal(n));
+const colorOf = (n) => COLORS[n.group] || '#8fa2c0';
+
+function makeHalo(n){
+  const base = colorOf(n);
+  const mat = new THREE.SpriteMaterial({
+    map: haloTex, color: base, transparent: true, opacity: .55,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.setScalar(sphereR(n) * CFG.haloScale);
+  spr.userData.nodeId = n.id;
+  halos.set(n.id, spr);
+  return spr;
+}
+let haloTex = null;
+
+/* -- visual state --------------------------------------------------------- */
+function styleFor(n){
+  const base = colorOf(n);
+  const isSel = selected && n.id === selected.id;
+  const lit = litIds.has(n.id);
+  const filtered = domainNodes && !domainNodes.has(n.id);
+  if (isSel)       return {color:'#ffffff', halo:hot(base), haloOp:.95, scale:1.55};
+  if (lit)         return {color:hot(base), halo:hot(base), haloOp:.8,  scale:1.15};
+  if (filtered)    return {color:dim(base), halo:dim(base), haloOp:.12, scale:.85};
+  return {color:base, halo:base, haloOp:.5, scale:1};
+}
+
+function repaintNodes(){
+  NODES.forEach(n => {
+    const st = styleFor(n);
+    const spr = halos.get(n.id);
+    if (spr){
+      spr.material.color.set(st.halo);
+      spr.material.opacity = st.haloOp;
+      spr.scale.setScalar(sphereR(n) * CFG.haloScale * st.scale);
+    }
+  });
+  if (Graph){
+    Graph.nodeColor(Graph.nodeColor());                      // documented refresh idiom
+    Graph.linkColor(Graph.linkColor());
+    Graph.linkWidth(Graph.linkWidth());
+    Graph.linkDirectionalParticles(Graph.linkDirectionalParticles());
+  }
+}
+function linkIsLit(l){ return litPair.has(l.source.id + '|' + l.target.id) || litPair.has(l.target.id + '|' + l.source.id); }
+
+function setFocus(node){
+  selected = node;
+  domainNodes = null;
+  document.querySelectorAll('.chip.on').forEach(c => c.classList.remove('on'));
+  litIds = new Set([node.id]);
+  litPair = new Set();
+  (adj.get(node.id) || []).forEach(({node:n2, link}) => {
+    litIds.add(n2.id);
+    litPair.add(link.source.id + '|' + link.target.id);
+  });
+  repaintNodes();
+  openPanel(node);
+  flyTo(node);
+}
+function setDomain(group){
+  selected = null;
+  litPair = new Set();
+  if (!group){ domainNodes = null; litIds = new Set(); }
+  else {
+    domainNodes = new Set(NODES.filter(n => n.group === group).map(n => n.id));
+    litIds = new Set(domainNodes);
+  }
+  repaintNodes();
+  closePanel();
+}
+function clearFocus(){
+  selected = null; domainNodes = null; litIds = new Set(); litPair = new Set();
+  document.querySelectorAll('.chip.on').forEach(c => c.classList.remove('on'));
+  repaintNodes();
+  closePanel();
+}
+
+/* -- camera --------------------------------------------------------------- */
+function flyTo(node){
+  if (!Graph) return;
+  const d = Math.max(70, camRadius * 0.42);
+  const dist = Math.hypot(node.x || 0, node.y || 0, node.z || 0);
+  const r = dist + 0.0001;
+  Graph.cameraPosition(
+    {x: node.x * (1 + d/r), y: node.y * (1 + d/r), z: node.z * (1 + d/r)},
+    {x: node.x, y: node.y, z: node.z},
+    CFG.flyMs
+  );
+  if (controls) controls.target.set(node.x || 0, node.y || 0, node.z || 0);
+}
+function resetCamera(animate = 1200){
+  if (!Graph) return;
+  Graph.cameraPosition({x: 0, y: camRadius * 0.22, z: camRadius}, {x: 0, y: 0, z: 0}, animate);
+  if (controls) controls.target.set(0, 0, 0);
+}
+
+/* -- idle drift ----------------------------------------------------------- */
+let lastTouch = 0;
+function markActivity(){
+  lastTouch = performance.now();
+  if (controls && controls.autoRotate) controls.autoRotate = false;
+}
+function tickIdle(){
+  if (!controls) return;
+  const idle = performance.now() - lastTouch > CFG.idleDelay;
+  if (idle !== controls.autoRotate) controls.autoRotate = idle;
+  requestAnimationFrame(tickIdle);
+}
+
+/* -- panel ---------------------------------------------------------------- */
+const panel = $('panel');
+function openPanel(node){
+  $('panel-label').textContent = node.label;
+  const c = colorOf(node);
+  $('panel-group').innerHTML = `<i style="background:${c};box-shadow:0 0 10px ${c}"></i>` +
+    `${esc(node.group)} <code>${esc(node.path || '')}</code>`;
+  $('panel-excerpt').textContent = node.excerpt || '(empty note)';
+  const list = $('panel-neighbours');
+  const neigh = (adj.get(node.id) || []).slice().sort((a,b) => a.node.label.localeCompare(b.node.label));
+  $('neigh-title').textContent = `Connected notes (${neigh.length})`;
+  list.innerHTML = '';
+  neigh.forEach(({node:n2, link}) => {
+    const b = document.createElement('button');
+    b.className = 'neigh';
+    b.innerHTML = `<i style="background:${colorOf(n2)}"></i>${esc(n2.label)}` +
+                  `<span class="kind">${link.kind === 'wikilink' ? '[[]]' : 'mentions'}</span>`;
+    b.onclick = () => { setFocus(n2); };
+    list.appendChild(b);
+  });
+  $('panel-meta').innerHTML =
+    `id ${node.id} &middot; index ${node.index} &middot; ${node.words || 0} words &middot; ` +
+    `${node.degree || neigh.length} links<br>${esc(node.path || '')}`;
+  panel.classList.add('open');
+  panel.setAttribute('aria-hidden', 'false');
+}
+function closePanel(){
+  panel.classList.remove('open');
+  panel.setAttribute('aria-hidden', 'true');
+}
+$('panel-close').onclick = () => clearFocus();
+
+/* -- legend --------------------------------------------------------------- */
+function buildLegend(){
+  const counts = {};
+  NODES.forEach(n => counts[n.group] = (counts[n.group] || 0) + 1);
+  const box = $('legend');
+  box.innerHTML = '';
+  Object.keys(counts).sort().forEach(g => {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    el.innerHTML = `<i style="background:${COLORS[g]};box-shadow:0 0 8px ${COLORS[g]}"></i>${esc(g)} <span class="n">${counts[g]}</span>`;
+    el.onclick = () => {
+      const on = el.classList.contains('on');
+      document.querySelectorAll('.chip.on').forEach(c => c.classList.remove('on'));
+      if (on) clearFocus(); else { el.classList.add('on'); setDomain(g); }
+    };
+    box.appendChild(el);
+  });
+}
+
+/* -- picking: works even when the click lands on a node's glow sprite ------ */
+function nearestNodeToScreen(clientX, clientY, maxPx = 72){
+  if (!THREE || !camera) return null;
+  const rect = Graph.renderer().domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const p = new THREE.Vector3();
+  const tanHalfFov = Math.tan((camera.fov * Math.PI / 180) / 2);
+  let best = null, bestScore = Infinity;
+  NODES.forEach(n => {
+    if (n.x == null) return;
+    p.set(n.x, n.y, n.z);
+    const along = p.clone().sub(ray.ray.origin).dot(ray.ray.direction);
+    if (along <= 0) return;                              // behind the camera
+    const perp = ray.ray.distanceToPoint(p);
+    const offsetPx = (perp / along) * (rect.height / (2 * tanHalfFov));  // true screen distance
+    if (offsetPx > maxPx) return;                        // too far off the cursor
+    const score = along * 0.001 + offsetPx;              // prefer the nearest thing to the cursor
+    if (score < bestScore){ bestScore = score; best = n; }
+  });
+  return best;
+}
+let downPos = null, dragDist = 0;
+stage.addEventListener('pointerdown', (e) => { downPos = [e.clientX, e.clientY]; dragDist = 0; markActivity(); }, true);
+stage.addEventListener('pointermove', (e) => {
+  if (downPos) dragDist = Math.max(dragDist, Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]));
+}, true);
+stage.addEventListener('pointerup', () => { markActivity(); }, true);
+stage.addEventListener('wheel', markActivity, {passive: true});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape'){ if (panel.classList.contains('open')) clearFocus(); else resetCamera(); }
+  if (e.key === '/' && document.activeElement !== $('q')){ e.preventDefault(); $('q').focus(); }
+  markActivity();
+});
+
+/* ------------------------------------------------------------------ boot */
+async function boot3d(){
+  bootMsg.textContent = 'Loading the renderer…';
+  try { THREE = await import(CFG.three); window.THREE = THREE; }
+  catch (err){ console.warn('[alfred] shared three.js failed to load, using the copy inside the bundle', err); }
+
+  const built = await loadScript(CFG.graph);
+  bootMsg.textContent = 'Building the galaxy…';
+
+  const ForceGraph3D = window.ForceGraph3D;
+  if (typeof ForceGraph3D !== 'function') throw new Error('3d-force-graph did not load');
+
+  if (THREE){
+    haloTex = radialTexture([[0,'rgba(255,255,255,1)'],[0.18,'rgba(255,255,255,.85)'],
+                             [0.45,'rgba(255,255,255,.28)'],[1,'rgba(255,255,255,0)']]);
+  } else {
+    console.warn('[alfred] shared three.js unavailable - the bundle will use its own copy ' +
+                 'and the glow sprites / starfield will be skipped');
+  }
+
+  Graph = new ForceGraph3D(stage, {controlType: 'orbit'})
+    .backgroundColor('#03040a')
+    .showNavInfo(false)
+    .nodeId('id')
+    .nodeRelSize(CFG.nodeRelSize)
+    .nodeVal(nodeVal)
+    .nodeOpacity(1)
+    .nodeResolution(16)
+    .nodeColor(n => styleFor(n).color)
+    .nodeLabel(n => `<b>${esc(n.label)}</b><br><span>${esc(n.group)} &middot; ${(adj.get(n.id)||[]).length} links</span>`)
+    .linkSource('source').linkTarget('target')
+    .linkColor(l => linkIsLit(l) ? '#cdeeff' : '#3d5578')
+    .linkWidth(l => linkIsLit(l) ? 1.35 : 0.35)
+    .linkOpacity(0.45)
+    .linkCurvature(0.12)
+    .linkDirectionalParticles(l => linkIsLit(l) ? 2 : 0)
+    .linkDirectionalParticleWidth(1.5)
+    .linkDirectionalParticleSpeed(0.0065)
+    .linkDirectionalParticleColor(() => '#dff6ff')
+    .warmupTicks(40)
+    .cooldownTicks(220)
+    .cooldownTime(9000)
+    .d3AlphaDecay(0.019)
+    .d3VelocityDecay(0.33)
+    .onNodeClick((n) => { if (dragDist < 6) setFocus(n); })
+    .onBackgroundClick((e) => {
+      // also fires for clicks that land on a node's glow sprite, so fall back to a raycast
+      if (dragDist >= 6) return;
+      const hit = nearestNodeToScreen(e.clientX, e.clientY);
+      if (hit) setFocus(hit); else clearFocus();
+    });
+
+  // settle geometry the library keeps private
+  try {
+    const charge = Graph.d3Force('charge');
+    if (charge && charge.strength) charge.strength(-135);
+    const link = Graph.d3Force('link');
+    if (link && link.distance) link.distance(n => 34 + (n.degree || 0) * 3);
+  } catch (err){ console.warn('[alfred] could not tune forces', err); }
+
+  Graph.graphData({nodes: NODES, links: linkObjs});
+
+  camera = Graph.camera();
+  camera.far = 45000;                      // room for the starfield shell
+  camera.near = 1.5;                        // keeps depth precision sane at that far plane
+  camera.updateProjectionMatrix();
+  camera.position.set(0, 0, 520);
+
+  controls = Graph.controls ? Graph.controls() : null;
+  if (controls){
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.autoRotateSpeed = 0.42;       // the slow idle drift
+    controls.zoomSpeed = 0.8;
+    controls.minDistance = 26;
+    controls.maxDistance = 4200;
+  }
+  lastTouch = performance.now();
+  requestAnimationFrame(tickIdle);
+
+  if (THREE){
+    const scn = Graph.scene();
+    starfield = makeStarfield(5200);
+    core = makeCoreGlow();
+    scn.add(starfield);
+    scn.add(core);
+    halos.clear();
+    Graph.nodeThreeObject(n => makeHalo(n));
+    Graph.nodeThreeObjectExtend(true);     // keep the solid core, add the glow
+    // the bundle ships AmbientLight(0xcccccc, PI) + DirectionalLight(0xffffff, 0.6*PI);
+    // scale from those rather than replacing them
+    const lights = Graph.lights();
+    if (lights && lights[0]) lights[0].intensity = Math.PI * 1.15;
+    if (lights && lights[1]) lights[1].intensity = 0.6 * Math.PI * 1.25;
+  } else {
+    console.warn('[alfred] running without the shared three.js - glow sprites and starfield are off');
+  }
+
+  repaintNodes();
+  buildLegend();
+  $('stats').textContent = `${NODES.length} notes · ${linkObjs.length} links · ` +
+                           `${Object.keys(COLORS).length} groups`;
+
+  // frame the whole galaxy once the layout has settled
+  Graph.onEngineStop(() => {
+    try {
+      const bb = Graph.getGraphBbox();
+      const span = bb ? Math.max(
+        (bb.x[1] - bb.x[0]) || 0, (bb.y[1] - bb.y[0]) || 0, (bb.z[1] - bb.z[0]) || 0) : 0;
+      camRadius = Math.min(1600, Math.max(240, span * 1.55));
+    } catch (err){ camRadius = 420; }
+    resetCamera(1600);
+    setTimeout(verifyRender, 900);
+  });
+
+  // tell the user straight away if the brain has no key yet
+  fetch('/health').then(r => r.ok ? r.json() : null).then(h => {
+    if (!h || !h.key || h.key.state === 'set') return;
+    const note = $('key-note');
+    if (!note) return;
+    note.textContent = h.key.state === 'missing'
+      ? 'No API key in config.json - the galaxy works, the brain is asleep.'
+      : 'config.json still holds the placeholder key - paste your real one and restart server.py to wake the brain.';
+    note.hidden = false;
+  }).catch(() => {});
+
+  // fade the boot overlay out as soon as we have actually drawn frames
+  setTimeout(() => boot.classList.add('gone'), 400);
+  window.__alfred = {graph: Graph, data: GRAPH, selfTest: verifyRender, focus: setFocus, reset: clearFocus};
+}
+
+/* -- in-browser health check: is the renderer really drawing? -------------- */
+function verifyRender(){
+  const out = {notes: NODES.length, links: linkObjs.length, three: null, webgl: null,
+               drawCalls: null, sceneChildren: null, starfield: null, ok: false};
+  try {
+    const r = Graph.renderer();
+    const gl = r.getContext();
+    out.webgl = gl ? (gl.getParameter(gl.VERSION) || 'yes') : 'no context';
+    out.three = (THREE && THREE.REVISION) || (window.__THREE__ ? String(window.__THREE__) : 'bundled');
+    out.drawCalls = r.info.render.calls;
+    out.sceneChildren = Graph.scene().children.length;
+    out.starfield = !!(starfield && starfield.parent);
+    out.cameraFar = camera ? camera.far : null;
+    out.ok = out.drawCalls > 0;
+  } catch (err){
+    out.error = String(err);
+  }
+  const el = $('status'), txt = $('status-text');
+  if (out.ok){
+    el.className = 'live';
+    txt.textContent = `live · ${out.drawCalls} draw calls · three r${out.three}`;
+  } else {
+    el.className = 'bad';
+    txt.textContent = 'renderer not drawing — open the console';
+  }
+  console.log('[alfred] self-test', out);
+  return out;
+}
+
+/* ------------------------------------------------------------ the brain UI */
+const form = $('ask-form'), input = $('q'), send = $('send');
+const answerBox = $('answer'), answerText = $('answer-text'),
+      answerSrc = $('answer-sources'), answerFoot = $('a-foot'), answerModel = $('a-model');
+
+function showAnswer(){ answerBox.hidden = false; }
+function thinking(){
+  answerText.className = 'thinking';
+  answerText.textContent = 'reading your notes…';
+  answerSrc.innerHTML = ''; answerFoot.textContent = ''; answerModel.textContent = '';
+  showAnswer();
+}
+function renderAnswer(data, question){
+  answerText.className = '';
+  answerText.textContent = data.answer || '(empty answer)';
+  answerModel.textContent = data.model ? `· ${data.model}` : '';
+  answerSrc.innerHTML = '';
+  (data.nodes || []).forEach(idx => {
+    const n = byIndex.get(idx);
+    if (!n) return;
+    const b = document.createElement('button');
+    b.className = 'src';
+    b.innerHTML = `<i style="background:${colorOf(n)}"></i>${esc(n.label)}<span class="idx">#${idx}</span>`;
+    b.onclick = () => setFocus(n);
+    answerSrc.appendChild(b);
+  });
+  const bits = [];
+  if (data.turns != null) bits.push(`memory ${data.turns} turn${data.turns === 1 ? '' : 's'}`);
+  if (data.model) bits.push(data.model);
+  answerFoot.textContent = bits.join(' · ');
+  showAnswer();
+}
+function renderError(msg, hint){
+  answerText.className = 'error';
+  answerText.textContent = msg + (hint ? '\n\n' + hint : '');
+  answerSrc.innerHTML = ''; answerModel.textContent = ''; answerFoot.textContent = '';
+  showAnswer();
+}
+$('a-close').onclick = () => { answerBox.hidden = true; };
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const question = input.value.trim();
+  if (!question || send.disabled) return;
+  send.disabled = true;
+  thinking();
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.error){
+      renderError(data.error || `The brain returned HTTP ${res.status}.`, data.hint || '');
+    } else {
+      renderAnswer(data, question);
+      input.value = '';
+    }
+  } catch (err){
+    renderError('Could not reach the server.', String(err));
+  } finally {
+    send.disabled = false;
+    input.focus();
+  }
+});
+
+/* rotating placeholder drawn from the actual note titles */
+(function rotatePlaceholder(){
+  const titles = NODES.map(n => n.label);
+  let i = Math.floor(Math.random() * titles.length);
+  setInterval(() => {
+    if (document.activeElement === input || input.value) return;
+    i = (i + 1) % titles.length;
+    input.placeholder = `Ask about “${titles[i]}”…`;
+  }, 5200);
+})();
+
+/* ------------------------------------------------------------------ start */
+boot3d().catch(err => {
+  console.error('[alfred] boot failed', err);
+  boot.classList.remove('gone');
+  bootMsg.innerHTML = 'The 3D layer could not start.<br><code>' + esc(err.message || err) + '</code>' +
+    '<br><br>This page needs a WebGL-capable browser and one-time access to a CDN ' +
+    '(cdn.jsdelivr.net). Details are in the browser console.';
+  $('status').className = 'bad';
+  $('status-text').textContent = 'boot failed';
+});
+</script>
+</body>
+</html>
