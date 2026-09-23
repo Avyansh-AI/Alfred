@@ -45,6 +45,19 @@ PLACEHOLDER_MODEL = "gpt-6-astra"
 TOP_N = 6                      # notes handed to the model
 CONTEXT_CHARS = 1500           # per note, when building the prompt
 HISTORY_TURNS = 3              # user+assistant pairs kept for follow-ups
+
+# When did the answer actually come from the notes? Two numbers decide it.
+#
+# RELEVANCE_FLOOR: below this score nothing in the notes really matches the question,
+#   so it was not a question about the notes at all ("good morning", a joke, an
+#   off-topic ask). Such a turn is answered from conversation alone and the viewer is
+#   told on_notes: false, which is what keeps the camera still.
+# SUPPORT_RATIO: among the notes that WERE handed to the model, only those scoring at
+#   least this fraction of the best one are reported as sources. The model reads the
+#   best six notes whether they help or not; a note dragged in by one shared word did
+#   not put anything into the answer, and the galaxy should not claim it did.
+RELEVANCE_FLOOR = 2.0
+SUPPORT_RATIO = 0.4
 MAX_BODY = 64 * 1024
 REQUEST_TIMEOUT = 60
 
@@ -57,6 +70,30 @@ SYSTEM_PROMPT = (
     "cover that\" - and then say what they do cover if anything nearby is relevant. Never "
     "invent details, and never use outside knowledge. Follow-up questions refer back to "
     "the conversation so far."
+)
+
+# Used instead of SYSTEM_PROMPT when the question was not about the notes. No note
+# excerpts are sent at all in that case - there is nothing in them to answer with.
+CHAT_PROMPT = (
+    "You are Alfred, the brain of a personal knowledge galaxy built from one person's "
+    "markdown notes. The user has said something that is not a question about their "
+    "notes - a greeting, thanks, a joke, small talk, or a question about you. Reply in "
+    "ONE short, friendly sentence. Do not invent facts about their notes, their life or "
+    "anything else, and do not pretend to know things you have not been told. If they "
+    "ask for a joke, tell one short joke."
+)
+
+# Phrases that are small talk rather than questions about the notes. They only take
+# effect when the notes also fail to match (see about_my_notes) - "thanks, what is the
+# budget?" is a question about the notes that happens to start with thanks.
+SMALL_TALK_PATTERNS = (
+    r"^\s*(hi|hey|hello|yo|sup|namaste|greetings)\b",
+    r"\b(good (morning|afternoon|evening|night)|how are you|how are things|how's it going|how is it going|what's up)\b",
+    r"\b(thanks|thank you|thx|cheers|nice one|well done|good job|much appreciated)\b",
+    r"\b(bye|goodbye|see you|good night|sleep well)\b",
+    r"\b(tell me a joke|joke|make me laugh|riddle|sing (me )?(a|something))\b",
+    r"\b(who are you|what are you|what can you do|what do you do|your name|are you (a )?(robot|ai|human|real))\b",
+    r"\b(i am (fine|good|ok|okay)|i'm (fine|good|ok|okay)|not bad|all good)\b",
 )
 
 STOPWORDS = {
@@ -258,6 +295,49 @@ def rank_notes(question: str, notes: list, top_n: int = TOP_N) -> list:
     return out
 
 
+def support_notes(picked: list) -> list:
+    """The picked notes that actually carry the answer, best first.
+
+    A note the model merely glanced at is not a source. Empty list means: the answer
+    was not built from the notes (or none of them matched), so nothing should be lit
+    and the camera has no reason to move.
+    """
+    if not picked:
+        return []
+    best = picked[0]["score"]
+    if best < RELEVANCE_FLOOR:
+        return []
+    floor = max(RELEVANCE_FLOOR, best * SUPPORT_RATIO)
+    return [p for p in picked if p["score"] >= floor]
+
+
+def looks_like_small_talk(question: str) -> bool:
+    q = norm(question)
+    return any(re.search(pattern, q) for pattern in SMALL_TALK_PATTERNS)
+
+
+def about_my_notes(question: str, picked: list, last_on_notes: bool):
+    """Was this question about the notes? Decided BEFORE anything moves.
+
+    Returns (on_notes, decision) with decision one of:
+      "notes"      - the notes match the question; answer from them
+      "small_talk" - a greeting, a joke, a question about Alfred; no notes are sent
+      "follow_up"  - a vague question after an earlier notes question ("and the
+                     deposit?") - still answered from the notes and the history
+      "no_match"   - nothing matched and the conversation has not been about the
+                     notes, so there is nothing honest to retrieve
+    """
+    top = picked[0]["score"] if picked else 0.0
+    small_talk = looks_like_small_talk(question)
+    if top >= RELEVANCE_FLOOR:
+        return True, "notes"
+    if small_talk:
+        return False, "small_talk"
+    if last_on_notes:
+        return True, "follow_up"
+    return False, "no_match"
+
+
 def build_messages(question: str, notes: list, picked: list, history: list) -> list:
     blocks = []
     for p in picked:
@@ -271,6 +351,13 @@ def build_messages(question: str, notes: list, picked: list, history: list) -> l
         "Answer in two or three sentences using only the notes above." % (context, question)
     )
     return [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user}]
+
+
+def build_chat_messages(question: str, history: list) -> list:
+    """Small talk: same history, no note excerpts, and a prompt that says so."""
+    user = ("The user said: %s\n\n"
+            "Reply in one short, friendly sentence." % question)
+    return [{"role": "system", "content": CHAT_PROMPT}] + history + [{"role": "user", "content": user}]
 
 
 # --------------------------------------------------------------------------- #
@@ -386,6 +473,7 @@ class State:
         self.root = os.path.abspath(args.root or DEFAULT_ROOT)
         self.base_url = args.openai_base_url or os.environ.get("ALFRED_OPENAI_BASE_URL") or DEFAULT_BASE_URL
         self.history = []                     # [{"role": .., "content": ..}, ..]
+        self.last_on_notes = False            # has this conversation been about the notes yet?
         self.lock = threading.Lock()
         self.started = time.time()
         self.questions = 0
@@ -547,46 +635,70 @@ class Handler(BaseHTTPRequestHandler):
         question = question[:1000]
 
         picked = rank_notes(question, state.notes)
-        nodes = [p["index"] for p in picked]
-        sources = [{"index": p["index"], "label": state.notes[p["index"]]["title"], "score": p["score"]}
-                   for p in picked]
-
         with state.lock:
             history = list(state.history)
-        messages = build_messages(question, state.notes, picked, history)
+            last_on_notes = state.last_on_notes
+
+        # Two decisions, in this order, before anything is allowed to move.
+        # 1. was this a question about the notes at all?
+        on_notes, decision = about_my_notes(question, picked, last_on_notes)
+        # 2. if so, which of the notes the model is shown actually carry the answer?
+        support = support_notes(picked) if on_notes else []
+        read = [p["index"] for p in picked] if on_notes else []
+        nodes = [p["index"] for p in support]
+        sources = [{"index": p["index"], "label": state.notes[p["index"]]["title"], "score": p["score"]}
+                   for p in support]
+
+        if on_notes:
+            messages = build_messages(question, state.notes, picked, history)
+        else:
+            messages = build_chat_messages(question, history)
 
         state.questions += 1
         try:
             answer = call_openai(state.cfg, messages, state.base_url)
         except BrainError as err:
-            # retrieval still worked: hand back the sources so the UI can light them up
+            # Retrieval still worked, so the sources come back - but there is no answer
+            # to justify them, and the viewer keeps the galaxy still unless ok is true.
             return self._json(err.status, {
                 "ok": False,
                 "error": err.message,
                 "code": err.code,
                 "hint": err.hint,
                 "answer": err.message,
+                "on_notes": on_notes,
+                "decision": decision,
                 "nodes": nodes,
                 "sources": sources,
+                "read": read,
                 "model": state.model,
                 "turns": len(history) // 2,
             })
         except Exception as err:                                  # never crash the server
             return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {
                 "ok": False, "error": "Unexpected brain failure: %s" % err,
-                "code": "internal_error", "nodes": nodes, "sources": sources,
+                "code": "internal_error", "on_notes": on_notes, "decision": decision,
+                "nodes": nodes, "sources": sources, "read": read,
             })
 
         with state.lock:
             state.history.append({"role": "user", "content": question})
             state.history.append({"role": "assistant", "content": answer})
             state.history = state.history[-(HISTORY_TURNS * 2):]
+            # Sticky on purpose: once the conversation has been about the notes, a vague
+            # question ("and the deposit?") is a follow-up rather than small talk, and it
+            # still gets the notes. Closing the door again would break follow-ups.
+            if on_notes:
+                state.last_on_notes = True
 
         return self._json(HTTPStatus.OK, {
             "ok": True,
             "answer": answer,
-            "nodes": nodes,
-            "sources": sources,
+            "on_notes": on_notes,
+            "decision": decision,
+            "nodes": nodes,           # the notes the answer came from (1-3: fly, 4+: the cluster)
+            "sources": sources,       # the same, with labels and scores
+            "read": read,             # what the model was shown, whether it used it or not
             "model": state.model,
             "turns": len(state.history) // 2,
         })

@@ -160,6 +160,7 @@
     font-family:var(--font); transition:.18s;
   }
   .src:hover{color:var(--ink); border-color:rgba(255,255,255,.25)}
+  .src.primary{color:var(--ink); border-color:rgba(123,255,196,.45); background:rgba(123,255,196,.07)}
   .src i{width:6px;height:6px;border-radius:50%;font-style:normal}
   .src .idx{font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
   .a-foot{padding:0 16px 12px; font-family:var(--mono); font-size:10px; color:var(--dimmer)}
@@ -401,6 +402,21 @@ const VOICE_NAMES = /daniel|serena|kate|arthur|sonia|libby|george|oliver|ryan|am
 // ?mute=1 silences the whole tab. Read once here and enforced inside speak(),
 // so nothing can route around it.
 const MUTED_BY_URL = /(?:^|[?&])mute=1(?:&|$)/.test(window.location.search);
+
+// ---------------------------------------------------------------------------
+// PROVENANCE - making the galaxy show where an answer came from.
+//
+// Up to this many supporting notes and the camera flies to the best one: the
+// answer came from one note (or a couple) and that note can be pointed at.
+// Four or more and the camera does not move at all - the answer came from a
+// cluster, and flying to one arbitrary note out of six would be a lie about
+// where it came from. The cluster is lit instead, exactly as it is.
+const PROVENANCE_FLY_MAX = 3;
+
+// The spoken answer stays short: past this many characters only the first
+// sentences are read out. The note itself is never read - it is on screen, and
+// reading it aloud is both longer and useless.
+const SPEAK_MAX_CHARS = 480;
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -1006,6 +1022,16 @@ async function boot3d(){
                          final: onFinalFragment, interim: onInterimFragment,
                          interrupt: interruptNow, finish: finishAndSend
                        }
+                     },
+                     // what the galaxy showed of where the last answer came from
+                     provenance: {
+                       FLY_MAX: PROVENANCE_FLY_MAX, SPEAK_MAX_CHARS,
+                       last: () => lastSourcePlan,
+                       lit: () => Array.from(litIds).sort((a, b) => a - b),
+                       litLinks: () => Array.from(litPair).sort(),
+                       panelOpen: () => panel.classList.contains('open'),
+                       panelLabel: () => $('panel-label').textContent,
+                       answerSource, showAnswerSource, spokenText
                      }};
 }
 
@@ -1107,7 +1133,7 @@ function forSpeech(text){
 }
 
 /* ---- the one function that speaks -------------------------------------- */
-function speak(text){
+function speak(text, detail){
   // THE mute gate. Checked here and nowhere else, so no code path can talk
   // around it: a ?mute=1 tab is silent no matter who asks.
   if (MUTED_BY_URL){
@@ -1182,7 +1208,9 @@ function speak(text){
     }, Math.max(4000, clean.length * 90 + 2000));
     u.onstart = () => {
       lastSpoken = clean;
-      setVoiceStatus('speaking', v ? (v.name + ' \u00b7 ' + v.lang) : 'system voice');
+      const bits = [v ? (v.name + ' \u00b7 ' + v.lang) : 'system voice'];
+      if (detail) bits.push(detail);
+      setVoiceStatus('speaking', bits.join(' \u00b7 '));
     };
     u.onend = () => done(true);
     u.onerror = (e) => {
@@ -1454,21 +1482,29 @@ function thinking(){
   answerSrc.innerHTML = ''; answerFoot.textContent = ''; answerModel.textContent = '';
   showAnswer();
 }
-function renderAnswer(data, question){
+function renderAnswer(data, plan){
   answerText.className = '';
   answerText.textContent = data.answer || '(empty answer)';
   answerModel.textContent = data.model ? `· ${data.model}` : '';
   answerSrc.innerHTML = '';
+  const primary = plan && plan.kind === 'single' ? plan.node : null;
   (data.nodes || []).forEach(idx => {
     const n = byIndex.get(idx);
     if (!n) return;
     const b = document.createElement('button');
-    b.className = 'src';
+    b.className = 'src' + (n === primary ? ' primary' : '');
+    if (n === primary) b.title = 'the camera flew here';
     b.innerHTML = `<i style="background:${colorOf(n)}"></i>${esc(n.label)}<span class="idx">#${idx}</span>`;
     b.onclick = () => setFocus(n);
     answerSrc.appendChild(b);
   });
   const bits = [];
+  // what the answer came from, said plainly - and how many notes it was shown
+  const used = (data.nodes || []).length;
+  if (data.on_notes === false) bits.push('no notes used');
+  else if (used) bits.push(`from ${used} note${used === 1 ? '' : 's'}`);
+  else bits.push('no notes matched');
+  if (data.read && data.read.length) bits.push(`read ${data.read.length}`);
   if (data.turns != null) bits.push(`memory ${data.turns} turn${data.turns === 1 ? '' : 's'}`);
   if (data.model) bits.push(data.model);
   answerFoot.textContent = bits.join(' · ');
@@ -1481,6 +1517,65 @@ function renderError(msg, hint){
   showAnswer();
 }
 $('a-close').onclick = () => { answerBox.hidden = true; };
+
+/* --------------------------------------------------- where an answer came from
+   The order of these two functions IS the feature, so keep it:
+
+     answerSource(data)      decide what the answer came from - pure, no side effects,
+                             nothing in here may touch the camera or the lights
+     showAnswerSource(plan)  only then act on that decision
+
+   Small talk never reaches the camera, because the server sends it back with no
+   sources at all and on_notes: false - the decision is made and is "still". That is
+   what stops "good morning" from dragging the view across the galaxy. */
+function answerSource(data){
+  const nodes = (Array.isArray(data && data.nodes) ? data.nodes : [])
+    .map(i => byIndex.get(i))
+    .filter(Boolean);
+  const usedNotes = !data || data.on_notes !== false;   // an older server says nothing: trust its list
+  const empty = {kind: 'still', nodes: [], why: !usedNotes ? 'small talk' : 'no notes used'};
+  if (!usedNotes || !nodes.length) return empty;
+  if (nodes.length >= PROVENANCE_FLY_MAX + 1)
+    return {kind: 'cluster', nodes, why: nodes.length + ' notes'};
+  return {kind: 'single', node: nodes[0], nodes, why: '1 note'};
+}
+
+function showAnswerSource(plan){
+  if (!plan || plan.kind === 'still') return;      // the galaxy holds perfectly still
+  if (plan.kind === 'single'){
+    // the whole answer: fly to it, light it and everything it is joined to, open it
+    setFocus(plan.node);
+    return;
+  }
+  // four or more notes: light the cluster itself, move nothing. The side panel names
+  // exactly one note, which is not what happened here, so it closes.
+  selected = null;
+  domainNodes = null;
+  closePanel();
+  litIds = new Set(plan.nodes.map(n => n.id));
+  litPair = new Set();
+  for (let i = 0; i < plan.nodes.length; i++){
+    for (let j = i + 1; j < plan.nodes.length; j++){
+      const a = plan.nodes[i], b = plan.nodes[j];
+      if ((adj.get(a.id) || []).some(e => e.node === b)) litPair.add(a.id + '|' + b.id);
+    }
+  }
+  repaintNodes();
+}
+
+/* The spoken version of an answer: the answer, and never the note. Past
+   SPEAK_MAX_CHARS it is cut at a sentence end - the rest is on screen, and reading
+   a note aloud is exactly what this must not do. */
+function spokenText(answer){
+  const full = String(answer == null ? '' : answer).trim();
+  if (full.length <= SPEAK_MAX_CHARS) return {text: full, trimmed: false};
+  const head = full.slice(0, SPEAK_MAX_CHARS);
+  const cut = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '));
+  if (cut < SPEAK_MAX_CHARS * 0.4) return {text: full, trimmed: false};   // one long sentence: read it
+  return {text: head.slice(0, cut + 1).trim(), trimmed: true};
+}
+
+let lastSourcePlan = null;      // what the last answer was judged to have come from
 
 /* One path for both input methods: a typed question and a spoken one go through
    exactly the same /chat flow, and every answer is spoken. */
@@ -1501,12 +1596,19 @@ async function submitQuestion(question){
     try { data = await res.json(); } catch (_){}
     if (!res.ok || data.error){
       const message = data.error || `The brain returned HTTP ${res.status}.`;
+      // no answer came back, so there is nothing to prove: hold the galaxy still
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'no answer'};
       renderError(message, data.hint || '');
       await speak(message);
     } else {
-      renderAnswer(data, question);
+      // 1. decide what this answer came from   2. act on it   3. speak
+      const plan = answerSource(data);
+      lastSourcePlan = plan;
+      renderAnswer(data, plan);
+      showAnswerSource(plan);        // the camera flies while the answer is being spoken
       input.value = '';
-      await speak(data.answer || '');
+      const spoken = spokenText(data.answer || '');
+      await speak(spoken.text, spoken.trimmed ? 'the short version - the rest is on screen' : '');
     }
   } catch (err){
     renderError('Could not reach the server.', String(err));

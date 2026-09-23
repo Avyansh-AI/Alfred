@@ -5,8 +5,10 @@ A 3D knowledge galaxy built from your markdown notes, with a brain you can talk 
 Every `.md` file becomes a glowing star. Notes that mention each other are joined by faint
 light. Click a star and the camera flies to it, lights up its neighbours and opens the note.
 Type a question in the bar at the bottom and the answer is drawn from your own notes - never
-from the internet, never from imagination. It answers out loud too, and you can just hold a
-conversation with it using the microphone button.
+from the internet, never from imagination. The galaxy shows you which notes it used: it flies to
+the note when there is one, lights the whole cluster when there are several, and stays still when
+you were only saying good morning. It answers out loud too, and you can just hold a conversation
+with it using the microphone button.
 
 No npm. No build step. No framework. Python 3 standard library plus one CDN script.
 
@@ -129,6 +131,65 @@ Two things worth knowing: Chrome and Edge are the only browsers with
 button included - it just tells you it cannot listen), and recognition sends your voice to the
 browser vendor's speech service, which is why it works without a key of your own.
 
+## Where an answer came from
+
+`/chat` reports which notes the answer came from, and the galaxy shows it rather than
+claiming it:
+
+* **One to three notes** - the camera flies to the best-scoring one, lights it and its direct
+  neighbours, and opens its side panel. This happens while the answer is still being spoken, so
+  you hear the answer *and* see the note it came from at the same time.
+* **Four or more** - nothing flies. The whole cluster lights up instead, with the links between
+  those notes. Flying to one arbitrary note out of six would be a lie about where the answer
+  came from, so the viewer refuses to pick one.
+* **No notes** - a greeting, a joke, or an off-topic question moves nothing at all. "Good
+  morning" leaves the camera exactly where it was.
+
+The answer box says the same thing in words: `from 1 note · read 6`, `from 6 notes · read 6`, or
+`no notes used`. The difference matters - the model is shown the best six notes whether they
+help or not, and only the ones that clear `SUPPORT_RATIO` of the best score are reported as
+sources.
+
+### The three cases, in pictures
+
+`tools/browser-provenance-check.mjs` runs the real server against the real notes with only the
+model stubbed, asks the three questions in a real browser and photographs each one:
+
+| question | what happens | shot |
+| --- | --- | --- |
+| "what is the budget for the move?" | one source: the camera flies to *Budget for the Move*, lights it and its 7 neighbours, opens its panel | `tools/screenshots/provenance-fly.jpg` |
+| "what should I pack and prepare before moving, and what is the budget?" | six sources: no flight, the whole cluster lights, panel closed | `tools/screenshots/provenance-cluster.jpg` |
+| "good morning" | no sources: the camera does not move, nothing lights, the answer still arrives and is spoken | `tools/screenshots/provenance-still.jpg` |
+
+### Deciding before moving (the part that separates a demo from a toy)
+
+`server.py` decides whether the question was about the notes at all **before** the viewer is
+allowed to decide anything about the camera, and it sends that decision with the answer:
+
+```python
+on_notes, decision = about_my_notes(question, picked, last_on_notes)   # "notes" | "small_talk" | "follow_up" | "no_match"
+support = support_notes(picked) if on_notes else []                    # what the answer came from
+```
+
+A question only counts as small talk when it *also* fails to match the notes, so "thanks, what
+is the budget?" is still a question about the notes. Nothing in `viewer/index.html` chooses a
+camera move on any other basis:
+
+```js
+const plan = answerSource(data);      // decide what the answer came from - no side effects
+showAnswerSource(plan);               // ...and only here may the camera or the lights move
+```
+
+`answerSource()` is a pure function of the reply: it never touches the camera, and a still plan
+does nothing at all. Small talk arrives with no sources and `on_notes: false`, so it falls out
+of the decision before any camera code can see it. A reply that arrives with an error is not an
+answer either, so it holds the galaxy still as well.
+
+Which notes count as sources is `SUPPORT_RATIO` (40%) and `RELEVANCE_FLOOR` (2.0) in
+`server.py`; how many are still "one note" for the camera is `PROVENANCE_FLY_MAX = 3` in
+`viewer/index.html`. The spoken answer is only ever the answer - `SPEAK_MAX_CHARS = 480` trims a
+very long one at a sentence end, and the full text stays on screen.
+
 ## Point it at your own notes
 
 By default it indexes `./notes`. Any folder of markdown works:
@@ -155,6 +216,11 @@ question and screenshots the result. It found three things that headless logic t
   stands down for the duration of a flight.
 * **The focused note hid behind the side panel.** The camera now pans so the note you flew to sits
   in the middle of the *visible* area - measured at 605px against a visible centre of 605px.
+
+One thing the provenance work corrected rather than caught: the README used to say an answer
+"lights those notes up in the galaxy". It never did - the response's node list was only ever
+rendered as chips under the answer. It lights them now, and only after the decision above says
+which notes the answer really came from.
 
 `tools/browser-voice-check.mjs` does the same for the voice layer, with a spy on
 `speechSynthesis` and a fake microphone. It caught two things:
@@ -184,8 +250,10 @@ question and screenshots the result. It found three things that headless logic t
 | `tools/browser.mjs` | the shared "find and launch a browser" helper both browser checks use |
 | `tools/harness.mjs` | the headless page harness: DOM, speech and recognition mocks, virtual clock |
 | `tools/verify-voice.mjs` | the voice logic under test: buffers, interrupts, mute, voice choice, status |
+| `tools/verify-provenance.mjs` | the provenance logic under test: fly-to-source, cluster, still, speech length |
 | `tools/browser-voice-check.mjs` | drives the voice layer in a real browser with a speech spy and a fake mic |
-| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`) |
+| `tools/browser-provenance-check.mjs` | the real server, the real notes, three questions, three photographs |
+| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `provenance-*.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -222,10 +290,20 @@ npm - which is exactly the situation this project was verified in.
   `stop` bypasses the buffer, that a `?mute=1` tab never touches the speech engine at all, that
   the British voice is preferred and a missing voice list does not break anything, and that a
   browser which never fires `onend` cannot wedge the UI.
+* `tools/verify-provenance.mjs` - what the galaxy does with the notes an answer came from: one
+  note flies (and the flight is a real camera tween), three still fly to the best one, four or
+  six light the cluster with no camera call at all, small talk and errors move nothing, the
+  top source is always the first index the server sent, the decision has no side effects until
+  `showAnswerSource()` is called, the note is never read aloud, and a long answer is trimmed at
+  a sentence end while the full text stays on screen.
 * `tools/browser-check.mjs` - drives the actual page in a real browser: 41 checks covering the
   drawn frame (pixel statistics), click-to-fly, panel contents, camera framing, the ask bar,
   the idle drift, keyboard shortcuts and the offline fallback. Needs Chrome; skip it with
   `SKIP_BROWSER=1 ./tools/verify.sh`.
+* `tools/browser-provenance-check.mjs` - starts the real `server.py` against the real notes and a
+  stubbed model, then asks the three questions above in a real browser and checks what the
+  galaxy did: camera units moved, which nodes are lit, the panel contents, what was spoken, and
+  what the model was actually sent (the greeting's prompt contains no note excerpts at all).
 * `tools/browser-voice-check.mjs` - the same page with the microphone faked and every call to
   the speech engine recorded: a typed question is spoken back, the British voice is picked, the
   mic opens a real recognition session in `en-IN`, a mid-sentence pause sends one combined
