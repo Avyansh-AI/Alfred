@@ -16,6 +16,9 @@ python3 build.py --check; mark $?
 step "viewer/index.html headless verification (node tools/verify.mjs)"
 if command -v node >/dev/null 2>&1; then node tools/verify.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
 
+step "voice logic: speaking, listening, the finish window, ?mute=1 (node tools/verify-voice.mjs)"
+if command -v node >/dev/null 2>&1; then node tools/verify-voice.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
+
 step "server + brain end-to-end (python3 tools/verify.py)"
 python3 tools/verify.py | tail -8; mark ${PIPESTATUS[0]}
 
@@ -26,6 +29,12 @@ elif ! command -v node >/dev/null 2>&1; then
   echo "   -> skipped (node not installed)"
 else
   node tools/browser-check.mjs 2>&1 | tail -14
+  code=${PIPESTATUS[0]}
+  [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
+  mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
+
+  step "real browser voice check: spoken answers, mic, pause window, mute tab (node tools/browser-voice-check.mjs)"
+  node tools/browser-voice-check.mjs 2>&1 | tail -14
   code=${PIPESTATUS[0]}
   [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
   mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
