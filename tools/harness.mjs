@@ -12,6 +12,10 @@ import vm from 'node:vm';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 export const HTML = fs.readFileSync(path.join(ROOT, 'viewer', 'index.html'), 'utf8');
 export const GRAPH_JS = fs.readFileSync(path.join(ROOT, 'viewer', 'graph-data.js'), 'utf8');
+export const GRAPH_DATA = (() => {
+  const m = GRAPH_JS.match(/const GRAPH\s*=\s*(\{[\s\S]*?\});/);
+  return m ? JSON.parse(m[1]) : {nodes: [], links: []};
+})();
 export const API = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools', 'api-3d-force-graph.json'), 'utf8'));
 
 export const ELEMENT_IDS = [
@@ -63,7 +67,24 @@ export function makeClock(){
       now = target;
       return this;
     },
-    pending(){ return [...timers.values()].map(t => t.at - now).sort((a, b) => a - b); }
+    pending(){ return [...timers.values()].map(t => t.at - now).sort((a, b) => a - b); },
+    /** advance the clock in small steps, yielding between them.
+     *
+     * This fake clock freezes during real time (setTimeout, setImmediate and promise
+     * continuations do not move it), which is what lets the suites drive animation
+     * frames by hand instead of waiting for a real paint. Anything that spins on
+     * performance.now() - the birth glow of a capture, say - needs the clock walked
+     * forward instead, which is what this is for.
+     */
+    async advanceAsync(ms, step = 16){
+      const target = now + ms;
+      let guard = 0;
+      while (now < target && guard++ < 5000){
+        this.advance(step);
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      return this;
+    }
   };
 }
 
@@ -157,7 +178,15 @@ export function makeGraphMock(three){
     get(target, prop){
       const specials = {
         graphData: (d) => {
-          (d.nodes || []).forEach((n, i) => { const a = i * 0.7; n.x = Math.cos(a)*60; n.y = Math.sin(a)*50; n.z = Math.sin(a)*30; n.fx = undefined; });
+          // 3d-force-graph keeps the node objects it is given, and d3 only seeds a
+          // position for a node that has none - so a node's own x/y/z survive every
+          // graphData() call. Adding a note mid-session relies on exactly that.
+          (d.nodes || []).forEach((n, i) => {
+            // d3 seeded a position for a node that has none; it never clears fx/fy/fz
+            if (n.x == null || n.y == null || n.z == null){
+              const a = i * 0.7; n.x = Math.cos(a)*60; n.y = Math.sin(a)*50; n.z = Math.sin(a)*30;
+            }
+          });
           target._graphData = d; recorded.data = d; return instance;
         },
         camera: () => target._camera,
@@ -245,6 +274,26 @@ export function makeRecognitionMock({ clock, unsupported = false }){
   return state;
 }
 
+/* A dull but valid answer to POST /remember: the real tests pass their own fetchImpl. */
+export function defaultCapture(health = {}){
+  const i = (health && health.notes) || GRAPH_DATA.nodes.length;
+  const label = 'The Finish Window Should Be 900';
+  const line = 'Filed and lit, sir. \u201c' + label + '\u201d is in the galaxy now, born beside ' +
+               'First Week in Ayodhya, holding on to nothing at all, and the galaxy is ' +
+               (i + 1) + ' notes strong.';
+  return {
+    ok: true, captured: true, filed: true, indexed: true, answer: line, line,
+    title: label, date: '2026-09-23', file: 'captures/the-finish-window-should-be-900.md',
+    index: i, notes: i + 1,
+    node: {id: i, index: i, label, group: 'captures', excerpt: 'The finish window should be 900 milliseconds.',
+           path: 'captures/the-finish-window-should-be-900.md', words: 15, chars: 103, degree: 0,
+           wikilinks: [], mentions: []},
+    anchor: {index: 0, label: GRAPH_DATA.nodes.length ? GRAPH_DATA.nodes[0].label : 'First Week in Ayodhya',
+             score: 1.15},
+    links: [], link_labels: [], graph_file: 'behind', model: 'stub-model', turns: 0
+  };
+}
+
 /* ------------------------------------------------------------------- boot it */
 export function patchModuleSource(){
   const m = HTML.match(/<script type="module">([\s\S]*?)<\/script>/);
@@ -327,6 +376,8 @@ export async function boot(options = {}){
       fetchCalls.push({url, opts, body: opts && opts.body ? JSON.parse(opts.body) : null});
       if (String(url).indexOf('/health') >= 0)
         return {ok: true, status: 200, json: async () => health};
+      if (String(url).indexOf('/remember') >= 0)
+        return {ok: true, status: 200, json: async () => defaultCapture(health)};
       return {ok: true, status: 200, json: async () => ({
         ok: true, answer: 'The movers quoted 26,000 for the road trip.',
         nodes: [7], sources: [{index: 7, label: 'Budget for the Move', score: 3}],
@@ -363,6 +414,7 @@ export async function boot(options = {}){
   const api = {clock, elements, sandbox, context, windowMock, windowEvents, documentMock,
                speech, recognition, fetchCalls, graph, three, flush,
                chatCalls(){ return fetchCalls.filter(c => c.url === '/chat'); },
+               rememberCalls(){ return fetchCalls.filter(c => c.url === '/remember'); },
                fireWindowEvent(type){ (windowEvents[type] || []).forEach(fn => fn({type})); },
                advance(ms){ clock.advance(ms); return this; },
                get app(){ return sandbox.window.__alfred; }};

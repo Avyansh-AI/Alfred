@@ -5,6 +5,8 @@ server.py - serves the viewer and gives the galaxy a brain.
   * serves ONLY the viewer/ folder (nothing else on disk is reachable)
   * POST /chat : scores every note against your question, sends the best six
     to the OpenAI API and returns {"answer": "...", "nodes": [indexes]}
+  * POST /remember : "remember that ..." writes a real markdown note into
+    notes/captures/, indexes it immediately and reports where to put the new star
   * keeps a short conversation history server-side so follow-ups work
 
 Python 3 standard library only.
@@ -16,6 +18,7 @@ Python 3 standard library only.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -23,6 +26,7 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -131,6 +135,57 @@ def greeting(count, hour=None):
     hour = time.localtime().tm_hour if hour is None else hour
     template = GREETING_ONE if int(count) == 1 else GREETING
     return template.format(part_of_day=part_of_day(hour), count=int(count))
+
+
+# ---- when something is filed ------------------------------------------------ #
+# The one line he says when a thought you have just given him goes into the notes.
+# It is spoken out loud and shown on screen word for word, so it is character, not
+# machinery - edit it here. {title} is the note's own title, {detail} says where it
+# was born and what it is holding on to, {count} is the real size of the galaxy,
+# and {reason} is the plain-language reason a file could not be written.
+CAPTURE_LINE = ("Filed and lit, sir. \u201c{title}\u201d is in the galaxy now, {detail}, "
+                "and the galaxy is {count} notes strong.")
+CAPTURE_BESIDE = "born beside {anchor}"
+CAPTURE_JOINED = "joined to {label}"
+CAPTURE_JOINED_MANY = "joined to {count} notes"
+CAPTURE_ALONE = "holding on to nothing at all"
+
+# Nothing was said after "remember that" - there is nothing to write down.
+CAPTURE_EMPTY_LINE = ("Remember what exactly, sir? There was nothing after the word "
+                      "\u201cremember\u201d for me to write down, so nothing was filed.")
+
+# The write itself failed. This one is never swallowed: he says it out loud.
+CAPTURE_FAILED_LINE = ("It did not go in, sir - {reason}. Nothing was written, and I would "
+                       "rather tell you than let you think that thought was safe.")
+
+# The file is on disk but the brain did not take it, which is just as serious.
+CAPTURE_UNINDEXED_LINE = ("The thought is written to {file}, sir, but it is not in the index - "
+                          "{reason}. I will not pretend you can search it yet.")
+
+
+def capture_line(title, count, anchor=None, links=()):
+    """The one spoken confirmation, assembled from the facts of the capture."""
+    bits = []
+    if anchor:
+        bits.append(CAPTURE_BESIDE.format(anchor=anchor))
+    labels = [l for l in links if l]
+    if len(labels) == 1:
+        # naming the same note twice in one breath ("born beside X, joined to X")
+        # is exactly the padding this character is not supposed to do
+        if labels[0] != anchor:
+            bits.append(CAPTURE_JOINED.format(label=labels[0]))
+    elif labels:
+        bits.append(CAPTURE_JOINED_MANY.format(count=len(labels)))
+    if not labels:
+        bits.append(CAPTURE_ALONE)
+    return CAPTURE_LINE.format(title=title, detail=", ".join(bits), count=int(count))
+
+
+def capture_failed(reason, filed=False, path=""):
+    """The line for a failure. `filed` says whether the file made it to disk."""
+    if filed:
+        return CAPTURE_UNINDEXED_LINE.format(file=path, reason=reason)
+    return CAPTURE_FAILED_LINE.format(reason=reason)
 
 
 # =========================================================================== #
@@ -301,6 +356,248 @@ def read_notes_dir(notes_dir: str) -> list:
                 "body": strip_markdown(raw),
             })
     return notes
+
+
+# --------------------------------------------------------------------------- #
+# captures - "remember that ..." writes a real note and indexes it right now
+#
+# Two things this section is careful about, because they bite later:
+#   1. Writing a file is not the same as indexing it. The note goes into the live
+#      list in this process the moment it is written, so the very next question can
+#      find it - no build.py, no restart. build.py only makes it part of the
+#      generated graph-data.js, which is why /health reports it as a "capture" for
+#      as long as the graph file has not caught up.
+#   2. A capture never fails silently. Every failure path returns ok: false and a
+#      line Alfred says out loud (see CAPTURE_FAILED_LINE in the persona block).
+# --------------------------------------------------------------------------- #
+class CaptureError(Exception):
+    """A capture that did not land. Carries whether the file itself got written."""
+
+    def __init__(self, reason, filed=False, path=""):
+        Exception.__init__(self, reason)
+        self.reason = reason
+        self.filed = filed
+        self.path = path
+
+
+def plain_error(err) -> str:
+    """One short, plain-language phrase for a filesystem failure."""
+    code = getattr(err, "errno", None)
+    said = (getattr(err, "strerror", None) or str(err) or "").lower()
+    if code in (errno.EACCES, errno.EPERM):
+        return "the notes folder will not let me write to it (%s)" % said
+    if code == errno.EROFS:
+        return "the notes folder is read-only"
+    if code == errno.ENOSPC:
+        return "there is no space left on the disk"
+    if code in (errno.ENOTDIR, errno.EISDIR, errno.EEXIST):
+        return "there is a file sitting where the captures folder should be (%s)" % said
+    if code == errno.ENOENT:
+        return "the notes folder is not there any more"
+    return "the write failed (%s)" % said
+
+
+CAPTURE_DIR = "captures"           # a folder inside the notes folder
+CAPTURE_TRIGGER = r"^\s*remember\b[:,]?\s*(?:that\b[:,]?\s*)?"
+CAPTURE_TITLE_WORDS = 6            # the title comes from the first few words
+CAPTURE_TAIL_WORDS = ("is", "are", "was", "were", "be", "been", "being", "am", "will", "shall",
+                      "should", "must", "can", "could", "would", "may", "might", "do", "does",
+                      "did", "have", "has", "had", "goes", "belongs")   # never a title's last word
+CAPTURE_MAX_CHARS = 4000           # a runaway transcription is not a note
+
+
+def note_key(text: str) -> str:
+    """Lowercase, accents and punctuation stripped - build.py:normalise, verbatim.
+
+    Must stay identical to build.py:normalise or the links this server adds to a
+    capture would differ from the ones the next build.py run generates.
+    """
+    s = unicodedata.normalize("NFKD", text or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9]+", " ", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def sentence_key(text_lower: str, key: str) -> bool:
+    """True if `key` appears as a whole word run. build.py:sentence_key, verbatim."""
+    if not key:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])"
+    return re.search(pattern, text_lower) is not None
+
+
+def strip_trigger(text: str) -> str:
+    """'remember that X' -> 'X'. Anything not starting with the trigger is returned as is."""
+    return re.sub(CAPTURE_TRIGGER, "", text or "", count=1, flags=re.I).strip()
+
+
+def is_capture(text: str) -> bool:
+    return bool(re.match(CAPTURE_TRIGGER, text or "", flags=re.I))
+
+
+def capture_slug(text: str) -> str:
+    """A filename from the first few words. build.py turns this back into the title.
+
+    Words that were SHOUTED are kept as they were typed, because build.py's
+    title_from_path keeps acronyms uppercase - so "the RML hospital visit" becomes
+    notes/captures/the-RML-hospital-visit.md and reads back as "The RML Hospital
+    Visit", not "The Rml Hospital Visit".
+    """
+    words = re.findall(r"[A-Za-z0-9']+", text or "")[:CAPTURE_TITLE_WORDS]
+    slug = "-".join(w if (w.isupper() and len(w) > 1) else w.lower() for w in words)
+    # a title should not end on a dangling preposition, conjunction or auxiliary
+    # ("the window repair is in the budget for the move" -> The Window Repair)
+    tail = sorted(SMALL_WORDS | set(CAPTURE_TAIL_WORDS))
+    slug = re.sub(r"(?:-(?:%s))+$" % "|".join(tail), "", slug)
+    slug = slug.strip("-")[:70].strip("-")
+    return slug or "capture"
+
+
+def capture_markdown(title: str, text: str, when: str) -> str:
+    """The file that lands in the notes folder: a title, the date, and your words."""
+    body = (text or "").strip()
+    if body:
+        body = body[0].upper() + body[1:]
+        if body[-1] not in ".!?":
+            body += "."
+    return "# %s\n\nCaptured %s.\n\n%s\n" % (title, when, body)
+
+
+def capture_target(notes_dir: str, slug: str) -> tuple:
+    """(folder, filename) for a new capture, never overwriting an existing note."""
+    folder = os.path.join(notes_dir, CAPTURE_DIR)
+    name = slug + ".md"
+    n = 2
+    while os.path.exists(os.path.join(folder, name)):
+        name = "%s-%d.md" % (slug, n)
+        n += 1
+        if n > 500:
+            return folder, "%s-%d.md" % (slug, int(time.time()))
+    return folder, name
+
+
+def read_one_note(notes_dir: str, rel: str) -> dict:
+    """The note as the rest of the brain would read it after a restart, or None."""
+    for n in read_notes_dir(notes_dir):
+        if n["path"] == rel:
+            return n
+    return None
+
+
+def capture_links(note: dict, raw: str, notes: list) -> tuple:
+    """The links build.py would draw for this note, plus the labels they join.
+
+    Same two rules as build.py:build_links:
+      (a) an explicit [[wikilink]] to another note's title or filename, weight 2
+      (b) a plain mention of another note's title in the text, weight 1
+    and the reverse of (b): an existing note whose text already mentions the new
+    title. Nothing else - a brand new note that mentions nothing gets no edges and
+    is left standing on its own, because inventing a link is inventing a fact.
+    """
+    keyed = {}
+    for i, other in enumerate(notes):
+        for key in {note_key(other["title"]),
+                    note_key(os.path.splitext(os.path.basename(other["path"]))[0])}:
+            if key:
+                keyed.setdefault(key, []).append(i)
+    pairs = {}
+    weight = Counter()
+    labels = []
+    new_index = note.get("index", len(notes) - 1)                 # `notes` already ends with this note
+
+    for wikilink in re.findall(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]", raw or ""):
+        for j in keyed.get(note_key(wikilink.strip()), []):
+            if j == new_index:
+                continue
+            pairs[(min(new_index, j), max(new_index, j))] = "wikilink"
+            weight[(min(new_index, j), max(new_index, j))] += 2
+
+    clean_lower = note["body"].lower()
+    for j, other in enumerate(notes):
+        if j == new_index:
+            continue
+        if sentence_key(clean_lower, note_key(other["title"])):
+            k = (min(new_index, j), max(new_index, j))
+            pairs.setdefault(k, "mention")
+            weight[k] += 1
+        elif sentence_key(other["body"].lower(), note_key(note["title"])):
+            k = (min(new_index, j), max(new_index, j))
+            pairs.setdefault(k, "mention")
+            weight[k] += 1
+
+    out = []
+    for (a, b), kind in sorted(pairs.items()):
+        out.append({"source": a, "target": b, "kind": kind, "weight": round(weight[(a, b)], 2)})
+        other = notes[b] if a == new_index else notes[a]
+        labels.append(other["title"])
+    return out, labels
+
+
+def capture_anchor(text: str, notes: list) -> dict:
+    """The existing note the new one is most related to - where it is born.
+
+    The same keyword scoring /chat retrieves with, over the notes that already
+    exist. No match at all means no anchor, and the viewer drops the new star at
+    the middle of the galaxy rather than pretending it has a home.
+    """
+    if len(notes) < 2:
+        return None
+    pool = notes[:-1]                  # the note being filed is the last one
+    picked = rank_notes(text, pool, top_n=1)
+    # A number is a weak word. "900 milliseconds" matching a train fare of 1,900 is a
+    # coincidence of digits, not a relationship, so if digits are the only reason for
+    # the best match, ask again about the words - and keep the digits if that finds
+    # nothing at all. Either way this is the same scorer /chat retrieves with.
+    if picked and picked[0]["hits"] and all(h.isdigit() for h in picked[0]["hits"]):
+        words_only = re.sub(r"\b\d+\b", " ", text or "").strip()
+        better = rank_notes(words_only, pool, top_n=1) if words_only else []
+        if better:
+            picked = better
+    if not picked:
+        return None
+    best = picked[0]
+    return {"index": best["index"], "label": notes[best["index"]]["title"],
+            "score": best["score"]}
+
+
+def capture_entry(note: dict, notes: list, raw: str, text: str, file_rel: str) -> dict:
+    """Everything the viewer needs to add one star to the running galaxy."""
+    links, labels = capture_links(note, raw, notes)
+    return {
+        "file": file_rel,
+        "node": {
+            "id": note["index"], "index": note["index"], "label": note["title"],
+            "group": note["group"], "excerpt": note["body"][:700], "path": note["path"],
+            "words": len(note["body"].split()), "chars": len(raw), "degree": len(links),
+            "wikilinks": [w.strip() for w in re.findall(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]", raw or "")],
+            "mentions": labels,
+        },
+        "anchor": capture_anchor(text, notes),
+        "links": links,
+    }
+
+
+def order_notes_like_graph(notes: list, graph_path: str) -> tuple:
+    """Notes in the order the galaxy is drawn in, plus the ones the graph lacks.
+
+    A node's id IS its position in viewer/graph-data.js, so the server's list has to
+    agree with it or an answer would light up the wrong star. Notes the graph file
+    does not know about yet (a capture since the last build.py run) are appended in
+    path order - the same place the viewer puts them.
+    """
+    try:
+        with open(graph_path, "r", encoding="utf-8") as fh:
+            m = re.search(r"const GRAPH\s*=\s*(\{.*?\});\s*(?:\n|$)", fh.read(), re.S)
+        known = [n.get("path") or "" for n in json.loads(m.group(1)).get("nodes", [])] if m else []
+    except (OSError, ValueError, AttributeError):
+        known = []
+    if not known:
+        return notes, []
+    by_path = {n["path"]: n for n in notes}
+    ordered = [by_path[p] for p in known if p in by_path]
+    seen = {id(n) for n in ordered}
+    extra = sorted((n for n in notes if id(n) not in seen), key=lambda n: n["path"])
+    return ordered + extra, extra
 
 
 def read_graph_data(path: str) -> list:
@@ -559,6 +856,7 @@ class State:
         self.root = os.path.abspath(args.root or DEFAULT_ROOT)
         self.base_url = args.openai_base_url or os.environ.get("ALFRED_OPENAI_BASE_URL") or DEFAULT_BASE_URL
         self.history = []                     # [{"role": .., "content": ..}, ..]
+        self.captures = []                    # notes the graph file does not know yet
         self.last_on_notes = False            # has this conversation been about the notes yet?
         self.lock = threading.Lock()
         self.started = time.time()
@@ -568,6 +866,23 @@ class State:
         if not self.notes:
             self.notes = read_graph_data(self.graph_path)
             self.source = "viewer/graph-data.js" if self.notes else "none"
+        # The viewer draws its nodes in the order build.py wrote them, and a node's
+        # id IS its position - so the brain's list is put in that same order, with
+        # anything the graph file has not caught up with yet appended at the end.
+        self.notes, self.unbuilt = order_notes_like_graph(self.notes, self.graph_path)
+        for i, n in enumerate(self.notes):
+            n["index"] = i    # the only index that matters: position in this list
+        # Notes filed since the last build.py run. They are already searchable (they
+        # are in self.notes above); these entries are how the viewer learns about
+        # them on boot, so reloading the page never loses a star.
+        for n in self.unbuilt:
+            try:
+                with open(os.path.join(self.notes_dir, n["path"]), "r",
+                          encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read()
+                self.captures.append(capture_entry(n, self.notes, raw, n["body"], n["path"]))
+            except OSError:
+                continue
 
     @property
     def model(self):
@@ -575,6 +890,8 @@ class State:
 
     def health(self, hour=None):
         groups = sorted({n["group"] for n in self.notes})
+        with self.lock:
+            captures = [dict(e) for e in self.captures]
         return {
             "ok": True,
             "notes": len(self.notes),
@@ -589,9 +906,79 @@ class State:
             "turns": len(self.history) // 2,
             "questions_asked": self.questions,
             "titles": [n["title"] for n in self.notes],
+            # Notes that exist in the brain but not yet in viewer/graph-data.js:
+            # captures taken since the last build.py run. The viewer adds these on
+            # boot so a reload never loses a thought that was filed. A build.py run
+            # empties this list, because the graph file then knows them itself.
+            "captures": captures,
+            "graph_file": "behind" if captures else "current",
             "uptime_s": round(time.time() - self.started, 1),
             "root": self.root,
         }
+
+    # -- captures ---------------------------------------------------------- #
+    def capture(self, text: str) -> dict:
+        """Write a real note, index it here and now, and describe the new star.
+
+        Returns a payload that is always honest about what happened:
+          ok        - the file is on disk AND the brain can search it already
+          filed     - the file made it to disk
+          indexed   - the notes list in this process now contains it
+        Nothing in here is allowed to fail quietly.
+        """
+        when = time.strftime("%Y-%m-%d")
+        slug = capture_slug(text)
+        folder, name = capture_target(self.notes_dir, slug)
+        rel = "%s/%s" % (CAPTURE_DIR, name)
+        # the title comes from the name the file actually gets - including the "-2"
+        # that keeps a second identical thought from overwriting the first. build.py
+        # titles a note from its filename, so this is the only way the live star and
+        # the rebuilt one can carry the same label.
+        title = title_from_filename(name)
+
+        # 1. the write. Into a hidden temp file first, then renamed, so a reader
+        #    can never catch a half-written note.
+        try:
+            os.makedirs(folder, exist_ok=True)
+            tmp = os.path.join(folder, ".%s.tmp" % name)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(capture_markdown(title, text, when))
+            os.replace(tmp, os.path.join(folder, name))
+        except OSError as err:
+            try:
+                if os.path.exists(locals().get("tmp", "")):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise CaptureError(plain_error(err), filed=False)
+        except Exception as err:                    # a surprise is still not silence
+            raise CaptureError("the write failed (%s)" % err.__class__.__name__, filed=False)
+
+        # 2. indexing it - read the file back through the same reader the rest of
+        #    the brain uses, so the new note is identical to one found at boot.
+        try:
+            with self.lock:
+                notes = list(self.notes)
+                note = read_one_note(self.notes_dir, rel)
+                if note is None:
+                    note = {"title": title, "group": CAPTURE_DIR, "path": rel,
+                            "body": strip_markdown(capture_markdown(title, text, when))}
+                note["index"] = len(notes)
+                notes.append(note)
+                raw = capture_markdown(title, text, when)
+                entry = capture_entry(note, notes, raw, text, rel)
+                self.notes = notes
+                self.captures = [e for e in self.captures if e["file"] != rel] + [entry]
+        except Exception as err:
+            raise CaptureError("the index would not take it (%s)" % err.__class__.__name__,
+                               filed=True, path=rel)
+
+        entry["title"] = title
+        entry["date"] = when
+        entry["notes"] = len(notes)
+        entry["anchor_label"] = (entry["anchor"] or {}).get("label")
+        entry["link_labels"] = [l for l in entry["node"]["mentions"]]
+        return entry
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -644,14 +1031,21 @@ class Handler(BaseHTTPRequestHandler):
                                "GET /chat is not supported - POST a JSON body with your question.",
                                'Example: curl -X POST -d \'{"question":"..."}\' '
                                'http://127.0.0.1:%d/chat' % self.server.server_address[1])
+        if path == "/remember":
+            return self._error(HTTPStatus.METHOD_NOT_ALLOWED,
+                               "GET /remember is not supported - POST a JSON body instead.",
+                               'Example: curl -X POST -d \'{"text":"remember that ..."}\' '
+                               'http://127.0.0.1:%d/remember' % self.server.server_address[1])
         return self._static(path, head_only)
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
         if path == "/chat":
             return self._chat()
+        if path == "/remember":
+            return self._remember()
         self._error(HTTPStatus.NOT_FOUND, "No such endpoint: %s" % path,
-                    "Only POST /chat exists on this server.")
+                    "Only POST /chat and POST /remember exist on this server.")
 
     def do_OPTIONS(self):
         self._send(HTTPStatus.NO_CONTENT, b"", extra={"Allow": "GET, HEAD, POST, OPTIONS"})
@@ -706,6 +1100,62 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not read %s: %s" % (rel, err))
         cache = "no-store" if ctype.startswith(("text/html", "application/javascript")) else "public, max-age=3600"
         return self._send(HTTPStatus.OK, body, ctype, {"Cache-Control": cache}, head_only)
+
+    # -- growing the brain -------------------------------------------------- #
+    def _remember(self):
+        """POST /remember - write the note, index it now, say what happened."""
+        state = self.state
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BODY:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "That is too long to file as one note.")
+        raw = self.rfile.read(length) if length else b""
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            return self._error(HTTPStatus.BAD_REQUEST, "Request body must be JSON.",
+                               'Send {"text": "remember that ..."}.')
+        if not isinstance(payload, dict):
+            return self._error(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object.")
+        text = (payload.get("text") or payload.get("question") or payload.get("note") or "").strip()
+        if not text:
+            return self._error(HTTPStatus.BAD_REQUEST, "There was nothing to remember.",
+                               'Send {"text": "remember that ..."}.')
+        text = text[:CAPTURE_MAX_CHARS]
+        # the trigger is stripped here as well as in the viewer: this endpoint accepts
+        # the whole sentence ("remember that the kettle is on the left") and files
+        # only the thought behind it
+        thought = strip_trigger(text) if is_capture(text) else text
+        if not thought:
+            return self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "captured": False, "filed": False, "indexed": False,
+                "code": "nothing_to_remember", "error": "There was nothing after the word remember.",
+                "answer": CAPTURE_EMPTY_LINE, "line": CAPTURE_EMPTY_LINE,
+                "notes": len(state.notes), "turns": len(state.history) // 2,
+            })
+        try:
+            entry = state.capture(thought)
+        except CaptureError as err:
+            line = capture_failed(err.reason, filed=err.filed, path=err.path)
+            return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {
+                "ok": False, "captured": False, "filed": err.filed, "indexed": False,
+                "code": "capture_failed", "error": err.reason, "answer": line, "line": line,
+                "file": err.path,
+                "hint": "Nothing was indexed, so /chat cannot answer from it either. Check that "
+                        "the notes folder is writable, then try again.",
+                "notes": len(state.notes), "turns": len(state.history) // 2,
+            })
+        line = capture_line(entry["title"], entry["notes"],
+                            anchor=entry["anchor_label"], links=entry["link_labels"])
+        return self._json(HTTPStatus.OK, {
+            "ok": True, "captured": True, "filed": True, "indexed": True,
+            "answer": line, "line": line,
+            "title": entry["title"], "date": entry["date"], "file": entry["file"],
+            "index": entry["node"]["index"], "node": entry["node"],
+            "anchor": entry["anchor"], "links": entry["links"],
+            "link_labels": entry["link_labels"], "notes": entry["notes"],
+            "graph_file": "behind",       # the new note is not in graph-data.js yet
+            "model": state.model, "turns": len(state.history) // 2,
+        })
 
     # -- the brain --------------------------------------------------------- #
     def _chat(self):
@@ -836,7 +1286,7 @@ def main(argv=None):
     print("  api key     : %s  (%s)" % (ks, state.config_path))
     if ks != "set":
         print("                -> /chat answers with a clean 'paste your key' error until this is set")
-    print("  endpoints   : GET /  GET /health  POST /chat")
+    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember")
     print("  ---------------------------------------------------------------")
     print("  ctrl-c to stop")
     print("")

@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import socket
+import shutil
 import subprocess
 import sys
 import threading
@@ -165,7 +166,7 @@ def main():
     print("  python       : %s" % sys.version.split()[0])
 
     # ------------------------------------------------------------------ build
-    print("\n[1/8] indexer")
+    print("\n[1/9] indexer")
     build = subprocess.run([PY, os.path.join(ROOT, "build.py"), "--check", "--quiet"],
                            cwd=ROOT, capture_output=True, text=True)
     check(build.returncode == 0, "build.py --check exits cleanly: %s" % (build.stdout.strip() or build.stderr.strip()))
@@ -205,7 +206,7 @@ def main():
         return 1
 
     # ------------------------------------------------------------------ server
-    print("\n[2/8] server + static files")
+    print("\n[2/9] server + static files")
     port = args.port or 4700
     if request("http://127.0.0.1:%d/" % port, timeout=1)[0] is not None:
         if args.port:
@@ -251,7 +252,7 @@ def main():
         check("sk-stub" not in body, "/health never echoes the key itself")
 
         # everything outside viewer/ must be unreachable
-        print("\n[3/8] the server serves only viewer/")
+        print("\n[3/9] the server serves only viewer/")
         for path in ["/../config.json", "/%2e%2e/config.json", "/../server.py", "/../build.py",
                      "/..%2fconfig.json", "/../.git/config"]:
             status, _, body = request(base + path)
@@ -283,7 +284,7 @@ def main():
               "HEAD / works (proxies and previews need it)")
 
         # ----------------------------------------------------------------- brain
-        print("\n[4/8] the brain, with a stubbed OpenAI")
+        print("\n[4/9] the brain, with a stubbed OpenAI")
         status, _, body = request(base + "/chat")
         check(status == 405, "GET /chat is a clean 405, not a crash (got %s)" % status)
         status, _, body = request(base + "/chat", method="POST", payload=None)
@@ -359,7 +360,7 @@ def main():
         check(proc.poll() is None, "the server is still alive after all of that")
 
         # ------------------------------------------------------------ provenance
-        print("\n[5/8] provenance: does the server know when a question was about the notes?")
+        print("\n[5/9] provenance: does the server know when a question was about the notes?")
         def ask_prov(q):
             st, _, bd = request(base + "/chat", method="POST", payload={"question": q})
             try:
@@ -412,7 +413,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------------- the persona, and the greeting he opens with
-        print("\n[6/8] the persona and the boot greeting")
+        print("\n[6/9] the persona and the boot greeting")
         sys.path.insert(0, ROOT)
         import server as alfred_server
         src = open(os.path.join(ROOT, "server.py")).read()
@@ -427,7 +428,7 @@ def main():
                   "%s is defined inside the persona block (line %d)" % (name, src[:where].count(chr(10)) + 1))
         check(banner < src.index("def part_of_day"),
               "so are the time-of-day names and the greeting builder")
-        check(src[banner:src.find("def ensure_config")].count("def ") == 2,
+        check(src[banner:src.find("def ensure_config")].count("def ") == 4,
               "and the character is otherwise prose and strings, not machinery")
 
         hours = [alfred_server.part_of_day(h) for h in range(24)]
@@ -485,7 +486,330 @@ def main():
                     vproc.kill()
 
         # ------------------------------------------------- placeholder-key path
-        print("\n[7/8] placeholder key")
+        # ------------------------------------------------- growing the brain by voice
+        print("\n[7/9] growing the brain by voice")
+        # A throwaway copy of the real vault AND of the real viewer/graph-data.js, so
+        # the ordering rules under test are the ones this project actually runs with -
+        # and no test ever writes into the repo's own notes folder.
+        vdir = tempfile.mkdtemp(prefix="alfred-remember-")
+        vault = os.path.join(vdir, "notes")
+        shutil.copytree(os.path.join(ROOT, "notes"), vault)
+        gcopy = os.path.join(vdir, "graph-data.js")
+        shutil.copyfile(os.path.join(ROOT, "viewer", "graph-data.js"), gcopy)
+        rcfg = os.path.join(vdir, "config.json")
+        with open(rcfg, "w") as fh:
+            json.dump({"openai_api_key": "sk-stub-key-for-verification", "model": "gpt-6-astra"}, fh)
+        rport = free_port()
+        rproc, _rban = start_server(rport, rcfg, ["--notes", vault, "--graph", gcopy,
+                                                 "--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port])
+        rbase = "http://127.0.0.1:%d" % rport
+        graph_before = open(gcopy, "rb").read()
+        status, _, body = request(rbase + "/health")
+        rhealth0 = json.loads(body) if status == 200 else {}
+        check(rhealth0.get("notes") == len(graph["nodes"]) and rhealth0.get("captures") == [],
+              "the capture vault starts as the galaxy does: %s notes, no captures waiting"
+              % rhealth0.get("notes"))
+        try:
+            # -- the endpoint's manners
+            status, _, body = request(rbase + "/remember")
+            check(status == 405 and "POST" in body, "GET /remember is a clean 405, not a crash (got %s)" % status)
+            status, _, body = request(rbase + "/remember", method="POST", payload=None)
+            check(status == 400, "POST /remember with no body is a clean 400 (got %s)" % status)
+            status, _, body = request(rbase + "/remember", method="POST", payload={"other": 1},
+                                      headers={"Content-Type": "application/json"})
+            check(status == 400, "POST /remember with the wrong field is a clean 400 (got %s)" % status)
+            status, _, body = request(rbase + "/remember", method="POST", payload={"text": "   "},
+                                      headers={"Content-Type": "application/json"})
+            check(status == 400 and "nothing to remember" in body.lower(),
+                  "an empty capture is refused, not filed")
+            status, _, body = request(rbase + "/remember", method="POST", payload={"text": "remember that"},
+                                      headers={"Content-Type": "application/json"})
+            empty = json.loads(body) if body else {}
+            check(empty.get("ok") is False and empty.get("code") == "nothing_to_remember",
+                  "a bare \"remember that\" says so instead of writing an empty note")
+            check("Nothing after the word" in empty.get("answer", "") or "nothing after the word" in empty.get("answer", ""),
+                  "and he says it out loud: %r" % empty.get("answer", "")[:70])
+            check(not os.path.exists(os.path.join(vault, "captures")),
+                  "no file and no folder were created by any of the refusals")
+
+            # -- a real capture
+            sentence = "remember that the finish window should be 900 milliseconds"
+            status, _, body = request(rbase + "/remember", method="POST", payload={"text": sentence},
+                                      headers={"Content-Type": "application/json"})
+            got = json.loads(body) if status == 200 else {}
+            check(status == 200 and got.get("ok") is True, "POST /remember files a note (HTTP %s)" % status)
+            check(got.get("filed") is True and got.get("indexed") is True,
+                  "and reports both: the file is on disk AND the brain already has it")
+            title = got.get("title", "")
+            check(title == "The Finish Window Should Be 900",
+                  "the title comes from the first few words of what was said: %r" % title)
+            relfile = got.get("file", "")
+            check(relfile == "captures/the-finish-window-should-be-900.md",
+                  "the file is a real markdown note in the captures folder: %s" % relfile)
+            disk = os.path.join(vault, relfile)
+            check(os.path.isfile(disk), "and it exists on disk")
+            text = open(disk, encoding="utf-8").read() if os.path.isfile(disk) else ""
+            today = time.strftime("%Y-%m-%d")
+            check(text.startswith("# %s\n" % title), "the file opens with its own title as a markdown heading")
+            check(today in text, "today's date is inside the file (%s)" % today)
+            check(text.lower().count("the finish window should be 900 milliseconds") == 1,
+                  "and the words you actually said are there, whole")
+            check(got.get("date") == today, "the response carries the same date (%s)" % got.get("date"))
+            check(got.get("index") == len(graph["nodes"]),
+                  "the new note takes the next free index (%s) - nobody else moved" % got.get("index"))
+            check(got.get("notes") == len(graph["nodes"]) + 1, "the galaxy is one note bigger: %s" % got.get("notes"))
+            anchor = got.get("anchor") or {}
+            check(anchor.get("index") is not None and anchor.get("index") < len(graph["nodes"]),
+                  "it is born beside the note it is most related to: %r (score %s)"
+                  % (anchor.get("label"), anchor.get("score")))
+            check(anchor.get("label") in [n["label"] for n in graph["nodes"]],
+                  "which is a real note in the galaxy, not an invention")
+            line = got.get("line", "")
+            check(line == got.get("answer"), "the confirmation is one line, spoken as written")
+            check(title in line and "%d notes strong" % got["notes"] in line,
+                  "it names the note and the real size of the galaxy: %r" % line)
+            check("holding on to nothing at all" in line,
+                  "and is honest that this thought mentions no other note")
+
+            # -- the two things that bite later
+            check(open(gcopy, "rb").read() == graph_before,
+                  "writing the note did NOT touch viewer/graph-data.js (no build.py was run)")
+            status, _, body = request(rbase + "/health")
+            h1 = json.loads(body) if status == 200 else {}
+            check(h1.get("notes") == len(graph["nodes"]) + 1, "/health counts the new note now")
+            check(h1.get("titles", [])[:len(graph["nodes"])] == [n["label"] for n in graph["nodes"]],
+                  "and the existing notes kept their exact order, so every id still points at the same star")
+            check(h1.get("titles", [])[-1:] == [title], "the new note is last, which is where the viewer puts it")
+            caps = h1.get("captures") or []
+            check(len(caps) == 1 and caps[0]["node"]["index"] == len(graph["nodes"]),
+                  "/health hands the viewer the new star for the next page load")
+            node_keys = set(graph["nodes"][0].keys())
+            check(node_keys.issubset(set(caps[0]["node"].keys())),
+                  "shaped like a real graph node (%s)" % ", ".join(sorted(node_keys)))
+            check(h1.get("graph_file") == "behind",
+                  "and says plainly that graph-data.js has not caught up yet")
+
+            # the next question must find it - with no rebuild, on this same server
+            status, _, body = request(rbase + "/chat", method="POST",
+                                      payload={"question": "what is the finish window in milliseconds?"},
+                                      headers={"Content-Type": "application/json"})
+            chat = json.loads(body) if status == 200 else {}
+            check(chat.get("ok") is True, "a question about the new note is answered (HTTP %s)" % status)
+            check(chat.get("decision") == "notes", "the question is judged to be about the notes: %s"
+                  % chat.get("decision"))
+            check(chat.get("nodes") == [got.get("index")],
+                  "and the new note is the source: %s" % chat.get("nodes"))
+            sent = json.dumps(stub.calls[-1]["body"]).lower() if stub.calls else ""
+            check("finish window should be 900" in sent,
+                  "the model was actually handed the new note's text")
+            check(open(gcopy, "rb").read() == graph_before, "and still no build.py was run")
+
+            # -- a restart must not lose it (a second brain that forgets is worse than none)
+            rproc.terminate()
+            try:
+                rproc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rproc.kill()
+            rport2 = free_port()
+            rproc, _rban = start_server(rport2, rcfg, ["--notes", vault, "--graph", gcopy,
+                                                       "--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port])
+            rbase2 = "http://127.0.0.1:%d" % rport2
+            status, _, body = request(rbase2 + "/health")
+            h2 = json.loads(body) if status == 200 else {}
+            check(h2.get("notes") == len(graph["nodes"]) + 1,
+                  "after a restart the note is still there (%s notes)" % h2.get("notes"))
+            caps2 = h2.get("captures") or []
+            check(len(caps2) == 1 and caps2[0]["node"]["index"] == len(graph["nodes"]),
+                  "and is still offered to the viewer at the same index")
+            check(caps2[0]["node"]["label"] == title and caps2[0].get("file") == relfile,
+                  "with the same title and the same file: %s" % caps2[0].get("file"))
+
+            # -- filing the same thought twice must not overwrite the first one
+            status, _, body = request(rbase2 + "/remember", method="POST", payload={"text": sentence},
+                                      headers={"Content-Type": "application/json"})
+            again = json.loads(body) if status == 200 else {}
+            check(again.get("file") == "captures/the-finish-window-should-be-900-2.md",
+                  "a second identical capture gets its own file: %s" % again.get("file"))
+            check(os.path.isfile(os.path.join(vault, relfile)),
+                  "and the first note is still on disk, untouched")
+            rebuilt = os.path.join(vdir, "rebuilt.js")
+            subprocess.run([PY, os.path.join(ROOT, "build.py"), "--notes", vault, "--out", rebuilt, "--quiet"],
+                           cwd=ROOT, capture_output=True, text=True)
+            check(subprocess.run([PY, os.path.join(ROOT, "build.py"), "--notes", vault, "--out", rebuilt,
+                                  "--quiet", "--check"], cwd=ROOT, capture_output=True, text=True).returncode == 0,
+                  "build.py --check is happy with the vault after captures (no duplicate titles)")
+
+            # -- the links are the links build.py would draw
+            linkdir = tempfile.mkdtemp(prefix="alfred-links-")
+            lvault = os.path.join(linkdir, "notes")
+            os.makedirs(os.path.join(lvault, "home"))
+            os.makedirs(os.path.join(lvault, "money"))
+            with open(os.path.join(lvault, "home", "first-week-in-ayodhya.md"), "w") as fh:
+                fh.write("# First Week in Ayodhya\n\nDay 5: set the desk up against the window.\n")
+            with open(os.path.join(lvault, "money", "budget-for-the-move.md"), "w") as fh:
+                fh.write("# Budget for the Move\n\nThe movers quoted 26,000 and the deposit is 20,000.\n")
+            with open(os.path.join(lvault, "home", "repairs.md"), "w") as fh:
+                fh.write("# Repairs\n\nThe window repair is booked for Friday.\n")
+            lcfg = os.path.join(linkdir, "config.json")
+            with open(lcfg, "w") as fh:
+                json.dump({"openai_api_key": "sk-stub-key-for-verification", "model": "gpt-6-astra"}, fh)
+            lport = free_port()
+            lproc, _lban = start_server(lport, lcfg, ["--notes", lvault,
+                                                      "--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port])
+            lbase = "http://127.0.0.1:%d" % lport
+            filed = {}
+            try:
+                def edges(links, name_of):
+                    out = {}
+                    for l in links:
+                        pair = " | ".join(sorted([name_of(l["source"]), name_of(l["target"])]))
+                        out[pair] = "%s/%g" % (l["kind"], float(l["weight"]))
+                    return out
+
+                def rebuild():
+                    """Run the real build.py over the vault and read its graph back."""
+                    out = os.path.join(linkdir, "graph.js")
+                    subprocess.run([PY, os.path.join(ROOT, "build.py"), "--notes", lvault, "--out", out, "--quiet"],
+                                   cwd=ROOT, capture_output=True, text=True)
+                    src_js = open(out).read()
+                    return json.loads(src_js[src_js.index("{"):src_js.rindex("}") + 1])
+
+                # Each capture is rebuilt the moment it is filed: the claim under test is
+                # "this note is linked the way build.py links it", so build.py is run
+                # right here rather than at the end - a later note may create new links
+                # (its text can only be known later), and that is a rebuild's job.
+                for label, said in [
+                    ("wikilink", "remember that [[Budget For The Move]] needs to cover the window repair"),
+                    ("mention", "remember that the window repair is in the budget for the move"),
+                    ("reverse", "remember that the window repair"),
+                ]:
+                    status, _, body = request(lbase + "/remember", method="POST", payload={"text": said},
+                                              headers={"Content-Type": "application/json"})
+                    filed[label] = json.loads(body) if status == 200 else {}
+                    check(filed[label].get("ok") is True, "filed the %s capture: %r" % (label, said[:46]))
+                    if not filed[label].get("ok"):
+                        continue
+                    data_now = rebuild()
+                    names = {n["id"]: n["label"] for n in data_now["nodes"]}
+                    mine_title = filed[label]["title"]
+                    check(mine_title in names.values(),
+                          "the title /remember reported is the title build.py gives the file (after any -2): %r"
+                          % mine_title)
+                    status, _, body = request(lbase + "/health")
+                    server_titles = (json.loads(body) if status == 200 else {}).get("titles", [])
+                    mine = edges(filed[label].get("links", []), lambda i: server_titles[i])
+                    theirs = {k: v for k, v in edges(data_now["links"], lambda i: names[i]).items()
+                              if mine_title in k.split(" | ")}
+                    check(mine == theirs, "build.py draws the %s capture exactly as /remember did: %s"
+                          % (label, mine if mine == theirs else "%s vs %s" % (mine, theirs)))
+                # the wikilink note names Budget twice (once as [[..]], once as prose), so
+                # build.py gives it kind=wikilink, weight=3 - this server must say the same
+                wl = [l for l in filed["wikilink"].get("links", [])]
+                check(len(wl) == 1 and wl[0]["kind"] == "wikilink" and wl[0]["weight"] == 3,
+                      "a [[wikilink]] plus the same prose mention is one edge, kind=wikilink, weight=3: %s" % wl)
+                check(filed["mention"].get("links") and filed["mention"]["links"][0]["weight"] == 1,
+                      "a plain mention of another note's title is an edge of weight 1: %s"
+                      % filed["mention"].get("links"))
+                rev = filed["reverse"].get("links") or []
+                check(rev and all(l["kind"] == "mention" for l in rev),
+                      "notes that already mention the new title link to it from the other side: %s" % rev)
+
+                data_end = rebuild()
+                check(all(n["id"] == i for i, n in enumerate(data_end["nodes"])),
+                      "and the rebuilt galaxy still has ids equal to indexes (%d nodes)" % len(data_end["nodes"]))
+                check(subprocess.run([PY, os.path.join(ROOT, "build.py"), "--notes", lvault,
+                                      "--out", os.path.join(linkdir, "graph.js"), "--quiet", "--check"],
+                                     cwd=ROOT, capture_output=True, text=True).returncode == 0,
+                      "build.py --check passes on the vault the captures were written into")
+            finally:
+                lproc.terminate()
+                try:
+                    lproc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    lproc.kill()
+
+            # -- a capture that cannot be written must say so, out loud
+            badvault = os.path.join(tempfile.mkdtemp(prefix="alfred-bad-"), "notes")
+            os.makedirs(os.path.join(badvault, "home"))
+            with open(os.path.join(badvault, "home", "note.md"), "w") as fh:
+                fh.write("# Note\n\nSomething worth remembering.\n")
+            with open(os.path.join(badvault, "captures"), "w") as fh:
+                fh.write("not a folder - this is what makes the write fail\n")
+            bcfg = os.path.join(os.path.dirname(badvault), "config.json")
+            with open(bcfg, "w") as fh:
+                json.dump({"openai_api_key": "sk-stub-key-for-verification", "model": "gpt-6-astra"}, fh)
+            bport = free_port()
+            bproc, _bban = start_server(bport, bcfg, ["--notes", badvault])
+            bbase = "http://127.0.0.1:%d" % bport
+            try:
+                status, _, body = request(bbase + "/remember", method="POST",
+                                          payload={"text": "remember that this one will not fit"},
+                                          headers={"Content-Type": "application/json"})
+                broke = json.loads(body) if body else {}
+                check(status == 500 and broke.get("ok") is False,
+                      "a capture that cannot be written comes back as a failure (HTTP %s)" % status)
+                check(broke.get("filed") is False and broke.get("indexed") is False,
+                  "with filed and indexed both false - nothing pretends to have worked")
+                check(broke.get("code") == "capture_failed", "and a code the viewer can act on: %s"
+                      % broke.get("code"))
+                check("captures folder" in broke.get("error", "").lower(),
+                      "the reason is plain language, not a traceback: %r" % broke.get("error"))
+                check("did not go in" in broke.get("answer", "") and broke.get("answer") == broke.get("line"),
+                      "and the line he says is the failure, word for word: %r" % broke.get("answer", "")[:80])
+                check(broke.get("hint"), "with a hint for the person who has to fix it")
+                status, _, body = request(bbase + "/health")
+                bh = json.loads(body) if status == 200 else {}
+                check(bh.get("notes") == 1, "nothing was indexed either - the brain is not lying about it")
+            finally:
+                bproc.terminate()
+                try:
+                    bproc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    bproc.kill()
+        finally:
+            rproc.terminate()
+            try:
+                rproc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rproc.kill()
+        check(not os.path.exists(os.path.join(ROOT, "notes", "captures")),
+              "no test wrote a capture into the project's own notes folder")
+
+        # ------------------------- the capture lines are part of the character
+        inside = src[banner:src.find("def ensure_config")]
+        for name in ("CAPTURE_LINE", "CAPTURE_FAILED_LINE", "CAPTURE_EMPTY_LINE", "CAPTURE_BESIDE", "CAPTURE_ALONE"):
+            check(name in inside, "%s lives in the persona block, with the rest of the character" % name)
+        check(inside.count("def ") == 4 and all(
+            ("def %s(" % name) in inside for name in ("part_of_day", "greeting", "capture_line", "capture_failed")),
+            "the persona block holds exactly its four builders and nothing else")
+        made = alfred_server.capture_line("Any Note At All", 13, anchor="Some Other Note", links=[])
+        check(made.startswith("Filed and lit, sir.") and "Some Other Note" in made
+              and "holding on to nothing at all" in made and "13 notes strong" in made,
+              "the confirmation is assembled from the facts: %r" % made)
+        check(alfred_server.capture_line("Any Note At All", 13, anchor="Same Note", links=["Same Note"])
+              .count("Same Note") == 1,
+              "and never names the same note twice in one breath")
+        check("joined to 3 notes" in alfred_server.capture_line("N", 20, anchor=None,
+                                                                links=["a", "b", "c"]),
+              "three links are counted, not listed")
+        failed_line = alfred_server.capture_failed("the notes folder is read-only")
+        check("did not go in" in failed_line and "read-only" in failed_line
+              and "Nothing was written" in failed_line,
+              "the failure line carries the reason and admits nothing was written: %r" % failed_line)
+        check("is written" in alfred_server.capture_failed("the index refused it", filed=True, path="captures/x.md")
+              and "captures/x.md" in alfred_server.capture_failed("the index refused it", filed=True,
+                                                                 path="captures/x.md"),
+              "a note that was written but not indexed is reported as exactly that")
+        for said, want in [("remember that the kettle is on the left", "the kettle is on the left"),
+                          ("Remember, that the kettle is on the left", "the kettle is on the left"),
+                          ("remember the kettle is on the left", "the kettle is on the left"),
+                          ("reminder: the kettle", "reminder: the kettle")]:
+            check(alfred_server.strip_trigger(said) == want, "the trigger strips cleanly: %r" % said[:38])
+        check(not alfred_server.is_capture("what is the kettle story?")
+              and alfred_server.is_capture("Remember that x"),
+              "only a leading 'remember' makes something a note rather than a question")
+
+        print("\n[8/9] placeholder key")
         ph_dir = tempfile.mkdtemp(prefix="alfred-ph-")
         ph_cfg = os.path.join(ph_dir, "config.json")
         ph_port = free_port()
@@ -550,7 +874,7 @@ def main():
         stub.shutdown()
 
     # ------------------------------------------------------------------ report
-    print("\n[8/8] summary")
+    print("\n[9/9] summary")
     fails = [m for state, m in results if state == "FAIL"]
     print("  %d checks, %d passed, %d failed" % (len(results), len(results) - len(fails), len(fails)))
     if fails:

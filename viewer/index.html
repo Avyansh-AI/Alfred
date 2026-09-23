@@ -162,6 +162,8 @@
   .src:hover{color:var(--ink); border-color:rgba(255,255,255,.25)}
   .src.primary{color:var(--ink); border-color:rgba(123,255,196,.45); background:rgba(123,255,196,.07)}
   #answer-text.greeting{color:var(--dim); font-style:italic}
+  #answer-text.captured{color:#c8ffe4}
+  #answer-text.captured.failed{color:var(--warn)}
   .src i{width:6px;height:6px;border-radius:50%;font-style:normal}
   .src .idx{font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
   .a-foot{padding:0 16px 12px; font-family:var(--mono); font-size:10px; color:var(--dimmer)}
@@ -405,6 +407,154 @@ const VOICE_NAMES = /daniel|serena|kate|arthur|sonia|libby|george|oliver|ryan|am
 const MUTED_BY_URL = /(?:^|[?&])mute=1(?:&|$)/.test(window.location.search);
 
 // ---------------------------------------------------------------------------
+// CAPTURES - a new note being born in the running galaxy.
+//
+// addCaptureNode() puts a star that arrived mid-session into the same data the
+// boot-time nodes live in: NODES, byIndex, adj, linkObjs and the engine's graph.
+// The links come from the server, computed by build.py's own rules (a [[wikilink]]
+// or a mention of another note's title), so the live star is wired exactly like one
+// that was there at boot - and a rebuild writes the same edges.
+//
+// It is born at the position of the existing note it is most related to, glows
+// briefly, and only then does the camera fly to it.
+function nextFreeColour(){
+  const used = new Set(Object.values(COLORS));
+  const free = PALETTE.find(c => !used.has(c));
+  if (free) return free;
+  return PALETTE[Object.keys(COLORS).length % PALETTE.length];
+}
+
+function isRemember(text){
+  return REMEMBER_TRIGGER.test(String(text == null ? '' : text));
+}
+
+function thoughtOf(sentence){
+  return String(sentence == null ? '' : sentence).replace(REMEMBER_TRIGGER, '').trim();
+}
+
+/* Put a brand new note into the live graph. Returns where it was born. */
+function addCaptureNode(entry){
+  const raw = (entry && entry.node) || {};
+  const id = (raw.index != null && !nodesById.has(raw.index)) ? raw.index : NODES.length;
+  const group = raw.group || 'captures';
+  const node = {
+    id, index: (raw.index != null ? raw.index : id),
+    label: raw.label || 'Untitled capture', group,
+    excerpt: raw.excerpt || '', path: raw.path || '',
+    words: raw.words || 0, chars: raw.chars || 0, degree: 0,
+    wikilinks: raw.wikilinks || [], mentions: raw.mentions || []
+  };
+  // its birthplace: the note it is most related to (a capture that relates to
+  // nothing is dropped at the middle of the galaxy rather than given a fake home)
+  const anchor = (entry && entry.anchor && nodesById.has(entry.anchor.index))
+    ? nodesById.get(entry.anchor.index) : null;
+  const at = anchor
+    ? {x: anchor.x || 0, y: anchor.y || 0, z: anchor.z || 0}
+    : {x: 0, y: 0, z: 0};
+  node.x = at.x; node.y = at.y; node.z = at.z;
+  node.vx = node.vy = node.vz = 0;
+  // Held still while it is born: the new star AND the note it was born beside are
+  // pinned for the length of the glow and the camera flight (submitCapture releases
+  // both). Without this the layout re-heats the moment a node is added and the two
+  // drift apart on the very next frame, which reads as the star being thrown in at
+  // random rather than arriving at its parent.
+  node.fx = at.x; node.fy = at.y; node.fz = at.z;
+  const held = anchor ? {node: anchor, x: anchor.x, y: anchor.y, z: anchor.z} : null;
+  if (anchor){ anchor.fx = anchor.x || 0; anchor.fy = anchor.y || 0; anchor.fz = anchor.z || 0; }
+
+  // a new folder gets its own colour, but existing groups keep theirs: re-running
+  // groupColors() would repaint the whole galaxy because 'captures' sorts first
+  if (!COLORS[group]) COLORS[group] = nextFreeColour();
+
+  NODES.push(node);
+  nodesById.set(node.id, node);
+  byIndex.set(node.index, node);
+  adj.set(node.id, []);
+
+  (entry && entry.links || []).forEach(l => {
+    const a = nodesById.get(typeof l.source === 'object' ? l.source.id : l.source);
+    const b = nodesById.get(typeof l.target === 'object' ? l.target.id : l.target);
+    if (!a || !b || a === b) return;
+    if ((adj.get(a.id) || []).some(e => e.node === b)) return;   // build.py writes one edge per pair
+    const link = {source: a, target: b, kind: l.kind || 'mention', weight: l.weight || 1};
+    linkObjs.push(link);
+    LINKS.push({source: a.id, target: b.id, kind: link.kind, weight: link.weight});
+    adj.get(a.id).push({node: b, link});
+    adj.get(b.id).push({node: a, link});
+    a.degree = (a.degree || 0) + 1;
+    b.degree = (b.degree || 0) + 1;
+  });
+  node.degree = (adj.get(node.id) || []).length;
+
+  if (Graph) Graph.graphData({nodes: NODES, links: linkObjs});
+  // pinned every time, in case handing the array to the engine touched it
+  node.fx = at.x; node.fy = at.y; node.fz = at.z;
+  if (anchor){ anchor.fx = anchor.x || 0; anchor.fy = anchor.y || 0; anchor.fz = anchor.z || 0; }
+  // The birth itself, recorded in the frame it happens: this is what "born at the
+  // position of its most related note" means, measured before the layout moves
+  // anything. Read the two positions together and they are the same point.
+  lastSpawn = {
+    id: node.id, label: node.label, group: node.group,
+    anchorId: anchor ? anchor.id : null, anchorLabel: anchor ? anchor.label : null,
+    anchorPos: anchor ? {x: anchor.x || 0, y: anchor.y || 0, z: anchor.z || 0} : null,
+    spawnPos: {x: node.x, y: node.y, z: node.z},
+    distance: anchor ? Math.hypot(node.x - (anchor.x || 0), node.y - (anchor.y || 0),
+                                  node.z - (anchor.z || 0)) : null,
+    links: (entry && entry.links ? entry.links.length : 0),
+    at: performance.now()
+  };
+  repaintNodes();
+  buildLegend();
+  updateStats();
+  return {node, anchor, at, id, held};
+}
+
+/* The birth: a short glow, and only afterwards does the camera go to it. Anything
+   the renderer cannot do (no shared three.js, no halo sprite) resolves at once -
+   the note is still added, still linked, still flown to. */
+function birthPulse(born){
+  const node = born && born.node;
+  const ms = CAPTURE_PULSE_MS;
+  if (!node || !Graph || !THREE) return Promise.resolve({ms: 0, ring: false, endedAt: performance.now()});
+  const sprite = halos.get(node.id);
+  const r0 = sphereR(node) * CFG.haloScale;
+  let ring = null, ringMat = null;
+  try {
+    ringMat = new THREE.SpriteMaterial({
+      map: haloTex, color: hot(colorOf(node)), transparent: true, opacity: .9,
+      blending: THREE.AdditiveBlending, depthWrite: false });
+    ring = new THREE.Sprite(ringMat);
+    ring.position.set(node.x || 0, node.y || 0, node.z || 0);
+    ring.scale.setScalar(r0 * 0.6);
+    Graph.scene().add(ring);
+  } catch (err){ ring = null; }
+
+  const t0 = performance.now();
+  return new Promise(resolve => {
+    const step = () => {
+      const p = Math.min(1, (performance.now() - t0) / ms);
+      const flare = Math.sin(Math.PI * p);                  // 0 -> 1 -> 0
+      if (sprite){
+        sprite.scale.setScalar(r0 * (1 + 2.6 * flare));
+        sprite.material.opacity = Math.min(0.97, 0.55 + 0.45 * flare);
+      }
+      if (ring){
+        ring.scale.setScalar(r0 * (0.6 + 5.4 * p));
+        ringMat.opacity = 0.9 * (1 - p) * (1 - p);
+      }
+      if (p < 1){ requestAnimationFrame(step); return; }
+      if (ring){
+        try { Graph.scene().remove(ring); } catch (err){}
+        ring = null;
+      }
+      repaintNodes();                        // leave the halo as the style says
+      resolve({ms, ring: true, node: node.id, endedAt: performance.now()});
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // PROVENANCE - making the galaxy show where an answer came from.
 //
 // Up to this many supporting notes and the camera flies to the best one: the
@@ -418,6 +568,18 @@ const PROVENANCE_FLY_MAX = 3;
 // sentences are read out. The note itself is never read - it is on screen, and
 // reading it aloud is both longer and useless.
 const SPEAK_MAX_CHARS = 480;
+
+/* ---------------------------------------------------------------------------
+   GROWING THE BRAIN - anything that starts with the trigger below is a note, not
+   a question. It is POSTed to /remember (see the captures section of server.py),
+   which writes a real markdown file into notes/captures/ and indexes it straight
+   away, so the very next question can be answered from it.
+   --------------------------------------------------------------------------- */
+const REMEMBER_TRIGGER = /^\s*remember\b[:,]?\s*(?:that\b[:,]?\s*)?/i;
+
+// How long a newly filed star glows before the camera goes to it: born at its most
+// related note, a brief pulse, then the flight. THIS IS THE ONLY PLACE IT IS DEFINED.
+const CAPTURE_PULSE_MS = 1100;
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -523,6 +685,7 @@ let selected = null;            // currently focused node
 let lastFlyTo = null;           // destination of the most recent camera flight
 let hoveredId = null;
 let domainNodes = null;         // set when filtering by group
+let lastSpawn = null;           // the instant a capture was born, before the glow
 
 /* -- sprites are built from tiny canvases so we need no extra assets -------- */
 function radialTexture(stops, size = 128){
@@ -802,6 +965,10 @@ function closePanel(){
 $('panel-close').onclick = () => clearFocus();
 
 /* -- legend --------------------------------------------------------------- */
+function updateStats(){
+  $('stats').textContent = `${NODES.length} notes · ${linkObjs.length} links · ` +
+                           `${Object.keys(COLORS).length} groups`;
+}
 function buildLegend(){
   const counts = {};
   NODES.forEach(n => counts[n.group] = (counts[n.group] || 0) + 1);
@@ -967,8 +1134,7 @@ async function boot3d(){
 
   repaintNodes();
   buildLegend();
-  $('stats').textContent = `${NODES.length} notes · ${linkObjs.length} links · ` +
-                           `${Object.keys(COLORS).length} groups`;
+  updateStats();
 
   // Frame the whole galaxy once the layout settles - but only while the viewer has
   // not taken the camera anywhere itself. On a slow machine (or a big vault) the
@@ -993,6 +1159,11 @@ async function boot3d(){
   fetch('/health?hour=' + new Date().getHours()).then(r => r.ok ? r.json() : null).then(h => {
     if (!h) return;
     if (h.greeting) greet(h.greeting);
+    // notes filed since the last build.py run: the server kept them, so a reload
+    // shows them too, quietly - no pulse and no camera flight at boot
+    (h.captures || []).forEach(entry => {
+      try { addCaptureNode(entry); } catch (err){ console.warn('[alfred] could not add a capture', err); }
+    });
     if (h.key && h.key.state !== 'set'){
       const note = $('key-note');
       if (note){
@@ -1033,6 +1204,21 @@ async function boot3d(){
                        }
                      },
                      greeting: () => ({shown: greeted, text: greeted ? answerText.textContent : ''}),
+                     // growing the brain by voice: filing a note and watching it arrive
+                     capture: {
+                       PULSE_MS: CAPTURE_PULSE_MS, trigger: REMEMBER_TRIGGER,
+                       isRemember, thoughtOf, submitCapture, addCaptureNode, birthPulse,
+                       lastBirth: () => lastBirth,
+                       lastSpawn: () => lastSpawn,
+                       nodes: () => NODES.map(n => ({id: n.id, index: n.index, label: n.label,
+                                                     group: n.group, degree: n.degree,
+                                                     x: n.x, y: n.y, z: n.z, path: n.path})),
+                       links: () => linkObjs.map(l => ({source: l.source.id, target: l.target.id,
+                                                        kind: l.kind, weight: l.weight})),
+                       click: (id) => { const n = nodesById.get(id); if (n) setFocus(n); return !!n; },
+                       stats: () => $('stats').textContent,
+                       foot: () => answerFoot.textContent
+                     },
                      // what the galaxy showed of where the last answer came from
                      provenance: {
                        FLY_MAX: PROVENANCE_FLY_MAX, SPEAK_MAX_CHARS,
@@ -1504,9 +1690,9 @@ function greet(line){
   showAnswer();
   speak(text);
 }
-function thinking(){
+function thinking(label){
   answerText.className = 'thinking';
-  answerText.textContent = 'reading your notes…';
+  answerText.textContent = label || 'reading your notes…';
   answerSrc.innerHTML = ''; answerFoot.textContent = ''; answerModel.textContent = '';
   showAnswer();
 }
@@ -1603,13 +1789,93 @@ function spokenText(answer){
   return {text: head.slice(0, cut + 1).trim(), trimmed: true};
 }
 
+/* A capture, on screen. The line comes from the server (persona + the real facts of
+   where the note landed), and the footer says where the file is - including the
+   honest note that the graph file has not caught up with it yet. */
+function renderCapture(data, ok){
+  answerText.className = 'captured' + (ok ? '' : ' failed');
+  answerText.textContent = data.line || data.answer || (ok ? 'Filed.' : 'It did not go in.');
+  answerModel.textContent = '';
+  answerSrc.innerHTML = '';
+  if (ok){
+    const bits = ['filed'];
+    if (data.file) bits.push(data.file);
+    if (data.date) bits.push(data.date);
+    if (data.node) bits.push(`${data.notes} notes, ${(data.node.degree || 0)} links`);
+    if (data.graph_file === 'behind') bits.push('run python3 build.py to write it into graph-data.js');
+    answerFoot.textContent = bits.join(' \u00b7 ');
+  } else {
+    answerFoot.textContent = data.hint || '';
+  }
+  showAnswer();
+}
+
+/* "remember that ..." - the other half of the ask bar. It writes a real note, and
+   then the galaxy grows: born at the note it is most related to, a brief glow, and
+   only then the camera. A failure is never silent - it is shown AND spoken. */
+async function submitCapture(sentence){
+  send.disabled = true;
+  thinking('writing it down\u2026');
+  setVoiceStatus('thinking', 'writing it down\u2026');
+  answerBox.hidden = false;
+  try {
+    const res = await fetch('/remember', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: sentence})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    const ok = res.ok && data.ok !== false && data.captured !== false;
+    if (!ok){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'the capture did not land'};
+      renderCapture(data, false);
+      await speak(data.line || data.answer || data.error ||
+                  `The brain returned HTTP ${res.status}.`);
+      return;
+    }
+    renderCapture(data, true);
+    lastSourcePlan = {kind: 'capture', nodes: [], why: 'a new note was filed', node: data.node};
+    const born = addCaptureNode(data);
+    input.value = '';                         // the thought is filed; the bar is free again
+    speak(data.line || data.answer);          // the confirmation, out loud
+    const pulse = await birthPulse(born);     // born, then a brief glow...
+    setFocus(born.node);                      // ...then the camera goes to it
+    // Let the layout have it only now: the star was pinned where it was born, and
+    // once the camera is on its way it becomes an ordinary citizen of the galaxy.
+    setTimeout(() => {
+      born.node.fx = born.node.fy = born.node.fz = undefined;
+      if (born.anchor) born.anchor.fx = born.anchor.fy = born.anchor.fz = undefined;
+    }, CFG.flyMs);
+    lastBirth = {id: born.node.id, label: born.node.label,
+                 anchor: born.anchor ? born.anchor.id : null, at: born.at,
+                 spawn: lastSpawn,
+                 pulseMs: CAPTURE_PULSE_MS, pulseEndedAt: pulse.endedAt,
+                 flewAt: lastFlyTo ? lastFlyTo.at : null, file: data.file || '',
+                 pinned: () => born.node.fx !== undefined};
+  } catch (err){
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'the capture did not land'};
+    renderCapture({line: 'It did not go in, sir - I could not reach the server.'}, false);
+    await speak('I could not reach the server, sir, so nothing was written.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
 let lastSourcePlan = null;      // what the last answer was judged to have come from
+let lastBirth = null;           // where the last capture was born and when it flew
 
 /* One path for both input methods: a typed question and a spoken one go through
    exactly the same /chat flow, and every answer is spoken. */
 async function submitQuestion(question){
   question = String(question || '').trim();
   if (!question || send.disabled) return;
+  // ONE decision, before anything else happens: a note to file, or a question to
+  // answer? "remember that ..." is a note - it goes to /remember, and only a
+  // question ever reaches the brain. Typed and spoken text both arrive here.
+  if (isRemember(question)) return submitCapture(question);
   send.disabled = true;
   thinking();
   setVoiceStatus('thinking', 'reading your notes\u2026');
@@ -1658,12 +1924,11 @@ form.addEventListener('submit', (e) => {
 
 /* rotating placeholder drawn from the actual note titles */
 (function rotatePlaceholder(){
-  const titles = NODES.map(n => n.label);
-  let i = Math.floor(Math.random() * titles.length);
+  let i = Math.floor(Math.random() * Math.max(1, NODES.length));
   setInterval(() => {
-    if (document.activeElement === input || input.value) return;
-    i = (i + 1) % titles.length;
-    input.placeholder = `Ask about “${titles[i]}”…`;
+    if (document.activeElement === input || input.value || !NODES.length) return;
+    i = (i + 1) % NODES.length;
+    input.placeholder = `Ask about “${NODES[i].label}”…`;
   }, 5200);
 })();
 

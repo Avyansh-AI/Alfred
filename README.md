@@ -8,7 +8,10 @@ Type a question in the bar at the bottom and it is answered by a dry, impeccably
 butler, from your own notes - never from the internet, never from imagination. The galaxy shows you which notes it used: it flies to
 the note when there is one, lights the whole cluster when there are several, and stays still when
 you were only saying good morning. It answers out loud too, and you can just hold a conversation
-with it using the microphone button.
+with it using the microphone button. Say **"remember that ..."** and it stops being a question:
+a real markdown file is written into `notes/captures/`, a new star is born in the running galaxy
+(beside the note it is most related to, with a brief glow, and then the camera goes to it), and
+the very next question can be answered from it - no rebuild, no reload.
 
 No npm. No build step. No framework. Python 3 standard library plus one CDN script.
 
@@ -247,6 +250,98 @@ Which notes count as sources is `SUPPORT_RATIO` (40%) and `RELEVANCE_FLOOR` (2.0
 `viewer/index.html`. The spoken answer is only ever the answer - `SPEAK_MAX_CHARS = 480` trims a
 very long one at a sentence end, and the full text stays on screen.
 
+## Grow the brain by voice
+
+Say (or type) anything that starts with **"remember that"** and it stops being a question:
+
+```
+you:  remember that the finish window should be 900 milliseconds
+him:  Filed and lit, sir. "The Finish Window Should Be 900" is in the galaxy now,
+      born beside Booking Train to Ayodhya, holding on to nothing at all,
+      and the galaxy is 13 notes strong.
+```
+
+And while he says it, a star arrives: **born at the position of its most related
+existing note**, a brief glow, then the camera flies to it and its panel opens. No
+reload, no restart, no rebuild.
+
+### What actually happens, in order
+
+1. The page sees the trigger **before** it decides anything else, and POSTs the whole
+   sentence to `POST /remember` - never to `/chat`, so the brain is never asked a
+   question it would have to invent an answer for.
+2. The server strips the trigger, makes a title from the first few words, and writes a
+   **real markdown file** into `notes/captures/` - `# The Finish Window Should Be 900`,
+   `Captured 2026-09-23.`, then your words. Written to a hidden temp file and renamed,
+   so a reader can never catch a half-written note, and a second identical thought gets
+   `...-2.md` rather than overwriting the first.
+3. It reads the file back through the same reader the rest of the brain uses and puts it
+   in the live note list **with the next free index**. `/chat` scores that list, so the
+   new note is a retrieval candidate for the very next question.
+4. It works out the new note's links with *build.py's own two rules* - a `[[wikilink]]`,
+   or a plain mention of another note's title in either direction - and the note it is
+   most related to (the same scorer `/chat` retrieves with). Both come back in the
+   response.
+5. The page adds the star to the real graph: same node array, same adjacency, the same
+   colour palette, `id == index` preserved. It is pinned exactly on its parent's
+   position, and the parent is pinned too, because adding a node re-heats the layout -
+   without that the glow happens somewhere off-screen and the star looks thrown in at
+   random.
+6. It glows for `CAPTURE_PULSE_MS` (1100ms, one named constant), and **only then** does
+   `setFocus()` fly the camera to it and open its panel. After the flight, both pins are
+   released and the layout settles it like any other note.
+
+### The two things that bite later
+
+**Writing a file is not the same as indexing it.** The note is searchable the moment it
+is written - in the live list, not by re-running `build.py`. `viewer/graph-data.js` is
+deliberately *not* rewritten: it only changes when you run `build.py`, which is why the
+footer says so ("run `python3 build.py` to write it into graph-data.js") and why
+`/health` reports `"graph_file": "behind"`. Until then the server hands the viewer every
+note the graph file does not yet know about (`health.captures`), so a **reload does not
+lose it either** - and a `build.py` run empties that list because the graph file then
+knows them itself. The server also keeps the graph file's order for everything the graph
+already knows, so every star keeps its id:
+
+```
+notes/captures/ gets a file -> the server's list gains the note at index 12
+                            -> /chat can answer from it immediately
+                            -> viewer/graph-data.js still says 12 notes
+                            -> python3 build.py -> 13 nodes, the capture now first (captures/ sorts first)
+```
+
+**A capture never fails silently.** Every failure path is spoken and shown, in character:
+
+| what went wrong | what he says |
+| --- | --- |
+| nothing after "remember" | "Remember what exactly, sir? There was nothing after the word "remember" for me to write down, so nothing was filed." |
+| the write failed (read-only folder, no space, a file where `captures/` should be) | "It did not go in, sir - there is a file sitting where the captures folder should be. Nothing was written, and I would rather tell you than let you think that thought was safe." |
+| the file was written but could not be indexed | "The thought is written to captures/x.md, sir, but it is not in the index - ... I will not pretend you can search it yet." |
+
+The response carries `ok`, `filed` and `indexed` separately, so "written but not
+searchable" can never be reported as success. In every failure case the galaxy does not
+move and no star is invented.
+
+### Try it yourself
+
+```bash
+python3 server.py            # then open http://127.0.0.1:4700
+```
+
+1. Say **"remember that the finish window should be 900 milliseconds"** (or type it and
+   press Enter). Watch the star appear beside its parent note, glow, and take the camera.
+2. Immediately ask **"what is the finish window in milliseconds?"** - the answer comes
+   from the note you just filed, and the galaxy flies to *that* star. `ls notes/captures/`
+   and the file is there, titled and dated. (Filing a note and watching the star arrive
+   needs no key at all; this second half is the ordinary `/chat` path, so it needs your key
+   in `config.json` - the same one it always needed.)
+3. Run `python3 build.py` when you like: the capture becomes part of the graph file and
+   the "run build.py" line in the footer goes away.
+
+The screenshots are `tools/screenshots/capture-born.jpg` (mid-glow), `capture-flown.jpg`
+(the camera has arrived), `capture-retrieved.jpg` (the next question answered from it) and
+`capture-failed.jpg` (a write that could not happen, said out loud).
+
 ## Point it at your own notes
 
 By default it indexes `./notes`. Any folder of markdown works:
@@ -297,7 +392,8 @@ which notes the answer really came from.
 | path | what it is |
 | --- | --- |
 | `build.py` | the indexer. Writes `viewer/graph-data.js` as `const GRAPH = {nodes, links}` |
-| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health` and `POST /chat` |
+| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat` and `POST /remember` |
+| `notes/captures/` | where "remember that ..." writes its notes - real markdown, indexed the moment they are written |
 | `viewer/index.html` | the whole viewer: 3d-force-graph from a CDN, starfield, HUD, side panel, ask bar |
 | `viewer/graph-data.js` | generated - rebuilt by `build.py`, never edit by hand |
 | `config.json` | your key and model (git-ignored, created automatically if missing) |
@@ -308,10 +404,12 @@ which notes the answer really came from.
 | `tools/harness.mjs` | the headless page harness: DOM, speech and recognition mocks, virtual clock |
 | `tools/verify-voice.mjs` | the voice logic under test: buffers, interrupts, mute, voice choice, status |
 | `tools/verify-provenance.mjs` | the provenance logic under test: fly-to-source, cluster, still, speech length |
+| `tools/verify-capture.mjs` | "grow the brain by voice" under test: `/remember`, the birth, the glow, the links, the loud failures |
+| `tools/browser-capture-check.mjs` | the real thing in a real browser: file on disk, star in the running galaxy, then the follow-up question |
 | `server.py` - "THE PERSONA" | the whole character, in one commented block at the top of the file |
 | `tools/browser-voice-check.mjs` | drives the voice layer in a real browser with a speech spy and a fake mic |
 | `tools/browser-provenance-check.mjs` | the real server, the real notes, three questions, three photographs |
-| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`) |
+| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -361,6 +459,26 @@ npm - which is exactly the situation this project was verified in.
   top source is always the first index the server sent, the decision has no side effects until
   `showAnswerSource()` is called, the note is never read aloud, and a long answer is trimmed at
   a sentence end while the full text stays on screen.
+* `tools/verify-capture.mjs` - "I can grow the brain by voice", headlessly: that "remember that
+  ..." goes to `/remember` and never `/chat`, that the star is added to the same arrays the graph
+  was built from (with `id == index` and the new link in the adjacency), that it is born exactly
+  on its parent's position, that it glows for the full 1100ms with the camera flight recorded as
+  starting *after* the glow, that the confirmation is the server's line spoken once, that the
+  ask bar is free again for the follow-up question, that a muted tab still files the note, that
+  a reload brings back captures the graph file has not caught up with, and - the important one -
+  that a failed write is added to nothing, moves nothing, and is **spoken out loud**.
+* `tools/verify.py` also covers `/remember` end to end against a real throwaway copy of the
+  vault: the file's title, its heading and today's date, the next free index, the note it was
+  born beside, that `/chat` answers the *next* question from it with no `build.py` run, that a
+  restart does not lose it, that a second identical capture does not overwrite the first, that
+  the links it reports are **byte-for-byte what build.py draws** for the same file (wikilink,
+  mention and the reverse mention), that the graph file is untouched, and that a sabotaged notes
+  folder produces `filed: false, indexed: false` and a plain-language reason.
+* `tools/browser-capture-check.mjs` - the test to do by hand, automated in a real browser against
+  the real server and a throwaway copy of the notes folder: the star is photographed mid-glow and
+  after the flight, the file is checked on disk, the follow-up question is asked and answered from
+  the new note (with the source chip naming it), and a second server whose `captures/` is a *file*
+  shows the failure spoken aloud. Nothing is written into this repo's own `notes/`.
 * `tools/browser-check.mjs` - drives the actual page in a real browser: 41 checks covering the
   drawn frame (pixel statistics), click-to-fly, panel contents, camera framing, the ask bar,
   the idle drift, keyboard shortcuts and the offline fallback. Needs Chrome; skip it with
