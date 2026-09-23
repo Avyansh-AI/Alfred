@@ -78,15 +78,23 @@ export async function launchBrowser({ exe = null, channel = null, args = [] } = 
     }
   }
 
-  try {
-    const browser = await puppeteer.launch({
-      executablePath,
-      channel: executablePath ? undefined : (channel || undefined),
-      headless: true,
-      args: [...extraArgs, ...args, '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
-    });
-    return {browser, puppeteer};
-  } catch (err){
-    return {error: 'launch-failed', message: String(err.message).split('\n')[0]};
+  // A launch can fail transiently - most often "Code: null" when another chromium has
+  // only just exited and its profile is still being torn down. One retry turns that into
+  // a non-event instead of a red run.
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++){
+    try {
+      const browser = await puppeteer.launch({
+        executablePath,
+        channel: executablePath ? undefined : (channel || undefined),
+        headless: true,
+        args: [...extraArgs, ...args, '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
+      });
+      return {browser, puppeteer};
+    } catch (err){
+      lastError = err;
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
   }
+  return {error: 'launch-failed', message: String(lastError.message).split('\n')[0]};
 }
