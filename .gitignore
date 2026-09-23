@@ -10,3 +10,6 @@ venv/
 # generated / scratch
 *.log
 .DS_Store
+
+# optional offline copies of the CDN files (python3 tools/vendor.py)
+viewer/vendor/

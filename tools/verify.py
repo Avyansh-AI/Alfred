@@ -259,6 +259,25 @@ def main():
                   "%s -> %s, no secret leaked" % (path, status))
         status, _, _ = request(base + "/nope.js")
         check(status == 404, "a missing viewer file returns 404 (got %s)" % status)
+
+        # the optional offline copy, if tools/vendor.py has been run
+        vendor_js = os.path.join(ROOT, "viewer", "vendor", "3d-force-graph.min.js")
+        if os.path.exists(vendor_js):
+            status, headers, body = request(base + "/vendor/3d-force-graph.min.js")
+            check(status == 200 and "javascript" in headers.get("Content-Type", ""),
+                  "the vendored fallback bundle is served as javascript (%s)" % status)
+            check(len(body) > 1000000, "the vendored bundle is the real thing (%.0f KB)" % (len(body) / 1024.0))
+            check(body.startswith("// Version 1.80.0"), "the vendored bundle is 3d-force-graph 1.80.0")
+            status, _, body = request(base + "/vendor/three.module.min.js")
+            check(status == 200 and "from\"./three.core.min.js\"" in body,
+                  "the vendored three.js still resolves its relative three.core.min.js import")
+            with open(os.path.join(ROOT, "viewer", "index.html")) as fh:
+                page = fh.read()
+            cdn_line = page.index("cdn.jsdelivr.net/npm/3d-force-graph")
+            vendor_line = page.index("./vendor/3d-force-graph.min.js")
+            check(cdn_line < vendor_line, "the viewer lists the CDN before the local copy (CDN stays primary)")
+        else:
+            print("  note  viewer/vendor/ is empty - run tools/vendor.py to exercise the offline fallback")
         status, headers, body = request(base + "/", method="HEAD")
         check(status == 200 and body == "" and "Content-Length" in headers,
               "HEAD / works (proxies and previews need it)")

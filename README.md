@@ -75,6 +75,23 @@ create links.
 | `config.json` | your key and model (git-ignored, created automatically if missing) |
 | `notes/` | a 12-note sample vault to show the thing off |
 | `tools/verify.sh` | one command that re-checks the indexer, the viewer and the brain |
+| `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
+
+## If your network blocks CDNs
+
+The viewer prefers the CDN and only falls back when it cannot be reached (jsDelivr, then
+unpkg, then a local copy). If a CDN is blocked on your network, make the local copy once:
+
+```bash
+python3 tools/vendor.py      # downloads from registry.npmjs.org, not from the CDN
+python3 server.py            # restart to pick it up
+```
+
+That writes `viewer/vendor/` - the graph engine plus the exact three.js revision, with a
+`manifest.json` holding versions and SHA-256 hashes. It is git-ignored (third-party build
+artefacts, not source) and safe to delete; the CDN stays the primary source either way. The
+download comes from the npm registry because a network that blocks CDNs usually still allows
+npm - which is exactly the situation this project was verified in.
 
 ## Verify it yourself
 
@@ -92,9 +109,18 @@ create links.
 In the browser, `__alfred.selfTest()` in the console reports whether the renderer is actually
 drawing (it also drives the "live" badge in the HUD).
 
+Two things the browser console may tell you, both harmless and both expected:
+
+* `Multiple instances of Three.js being imported` - the page imports three.js so the bundle can
+  reuse that exact instance; the bundle also carries its own copy, which stays unused.
+* `script not available: <url>` - one CDN was unreachable and the next source was tried.
+
 ## The CDN, and why three.js is pinned
 
 `viewer/index.html` loads `3d-force-graph@1.80.0` from jsDelivr. That bundle is built against
 three.js **r183** and reuses `window.THREE` when it is already defined, so the page loads
-exactly `three@0.183.0` first. If that CDN is unreachable the page falls back to unpkg, and if
-both fail it tells you in plain language what went wrong instead of showing a black rectangle.
+exactly `three@0.183.0` first - `three.module.min.js`, which imports `./three.core.min.js`
+relatively, so no import map is needed. The exact URLs and the version that ships them were
+checked against the live jsDelivr. If the CDN is unreachable the page falls back to unpkg and
+then to `./vendor/`, and if all of them fail it names the sources it tried instead of leaving
+you with a black rectangle.

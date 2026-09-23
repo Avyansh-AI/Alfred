@@ -85,7 +85,20 @@ const documentMock = {
   },
   getElementById: (id) => elements.get(id) || null,
   querySelectorAll: () => [],
-  head: {appendChild: (s) => { if (s.onload) setTimeout(() => s.onload(), 0); return s; }},
+  head: {
+    mode: 'all-ok',            // 'all-ok' | 'cdn-fails' | 'all-fail'
+    attempts: [],
+    appendChild(s) {
+      documentMock.head.attempts.push(s.src);
+      const isCdn = /^https?:/i.test(s.src);
+      const fails = documentMock.head.mode === 'all-fail' || (documentMock.head.mode === 'cdn-fails' && isCdn);
+      setTimeout(() => {
+        if (fails) { if (s.onerror) s.onerror(); }
+        else if (s.onload) s.onload();
+      }, 0);
+      return s;
+    }
+  },
   addEventListener() {},
   activeElement: null
 };
@@ -231,13 +244,16 @@ function buildMock() {
 /* ------------------------------------------------------------ extract the app */
 const m = HTML.match(/<script type="module">([\s\S]*?)<\/script>/);
 if (!m) { console.error('could not find the module script in viewer/index.html'); process.exit(1); }
-let code = m[1]
-  .replace(/THREE = await import\(CFG\.three\); window\.THREE = THREE;/,
-           'THREE = globalThis.__threeMock; window.THREE = THREE;')
-  .replace(/const built = await loadScript\(CFG\.graph\);/, 'const built = "mock";')
+const original = m[1];
+let code = original
+  // swap only the three.js import for the mock; loadScript keeps running for real,
+  // against the controllable <head> above, so the fallback chain is exercised
+  .replace(/THREE = await loadThree\(\);/, 'THREE = globalThis.__threeMock; window.THREE = THREE;')
   .replace(/const ForceGraph3D = window\.ForceGraph3D;/, 'const ForceGraph3D = globalThis.__ForceGraphMock;');
 
-if (code === m[1]) bad('could not patch the CDN imports in the viewer module');
+check(code !== original, 'the harness patched the three.js import for headless running');
+check(code.includes('await loadScript(CFG.graph)'),
+      "the viewer's real loadScript() is exercised (CDN shim, not stubbed out)");
 
 ['stage','grade','hud','stats','status','status-text','legend','hint','panel','panel-close',
  'panel-label','panel-group','panel-body','panel-excerpt','neigh-title','panel-neighbours',
@@ -265,6 +281,7 @@ try {
 } catch (err) {
   bad('the viewer module threw while booting: ' + err.message + '\n' + (err.stack || ''));
 }
+await sleep(80);   // let the async boot (script load -> graph build) complete
 
 /* --------------------------------------------------------------- assertions */
 const g = sandbox.window.GRAPH;
@@ -391,6 +408,47 @@ if (form && form._ev && form._ev.submit) {
   check(elements.get('answer-text').className === 'error', 'a placeholder-key error is styled as an error');
   check(elements.get('answer-text').textContent.includes('placeholder'),
         'the placeholder-key message is shown to the user instead of failing silently');
+}
+
+/* ---------------------------------------------- CDN fallback chain, for real */
+const alfred = sandbox.window.__alfred;
+check(!!(alfred && typeof alfred.loadScript === 'function' && Array.isArray(alfred.CFG.graph)),
+      'the viewer exposes its loaders so the fallback chain can be tested');
+if (alfred && typeof alfred.loadScript === 'function') {
+  const CFG = alfred.CFG;
+  check(CFG.graph.some(u => u.includes('cdn.jsdelivr.net')), 'jsDelivr is the first source for the graph bundle');
+  check(/^https:\/\/unpkg\.com/.test(CFG.graph[1] || ''), 'unpkg is the second source');
+  check(CFG.graph.some(u => u.startsWith('./vendor/')), 'the offline ./vendor copy is the last resort');
+  check(Array.isArray(CFG.three) && CFG.three[0].includes('three@0.183.0') && CFG.three[1].startsWith('./vendor/'),
+        'three.js is pinned to 0.183.0 with the same offline fallback');
+  check(CFG.graph.indexOf('./vendor/3d-force-graph.min.js') === CFG.graph.length - 1,
+        'the offline copy is tried last, never before a CDN');
+
+  // a) CDN unreachable -> it must reach the vendored copy
+  documentMock.head.mode = 'cdn-fails';
+  documentMock.head.attempts.length = 0;
+  let resolvedWith = null, resolveErr = null;
+  try { resolvedWith = await alfred.loadScript(CFG.graph); } catch (e) { resolveErr = e; }
+  check(resolvedWith === './vendor/3d-force-graph.min.js',
+        'when the CDNs are unreachable the viewer falls back to the local copy (got ' + resolvedWith + ')');
+  check(documentMock.head.attempts.length === 3, 'all three sources were tried in order: ' +
+        documentMock.head.attempts.join(' -> '));
+  check(documentMock.head.attempts[0].includes('jsdelivr') && documentMock.head.attempts[2].startsWith('./vendor/'),
+        'the attempt order is CDN, CDN, local');
+
+  // b) nothing reachable at all -> a clear error, not a blank page
+  documentMock.head.mode = 'all-fail';
+  documentMock.head.attempts.length = 0;
+  let rejection = null;
+  try { await alfred.loadScript(CFG.graph); } catch (e) { rejection = e; }
+  check(!!rejection, 'with every source unreachable loadScript() rejects instead of hanging');
+  check(rejection && Array.isArray(rejection.tried) && rejection.tried.length === CFG.graph.length,
+        'the rejection carries the list of sources it tried, for the on-screen message');
+  documentMock.head.mode = 'all-ok';
+
+  // c) no three.js anywhere -> the bundle is still allowed to render with its own copy
+  const three = await alfred.loadThree();
+  check(three === null, 'loadThree() returns null when three.js is unavailable (the bundle then uses its own copy)');
 }
 
 check(intervalCallbacks.length > 0, 'placeholder rotation timers were registered');

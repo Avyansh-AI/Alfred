@@ -282,12 +282,21 @@
    ========================================================================== */
 
 const CFG = {
-  // pinned: the bundle is built against three r183 and reuses window.THREE when
-  // it is already defined, so we hand it its own exact revision.
-  three: 'https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.min.js',
+  // Pinned on purpose. The 3d-force-graph bundle is built against three.js r183
+  // and reuses window.THREE when it is already defined, so we hand it that exact
+  // revision. Three is loaded first, and only then the bundle.
+  //   three.module.min.js imports ./three.core.min.js - a plain relative import,
+  //   so no import map is involved and the CDN serves both files.
+  // Each list is tried in order; ./vendor/* is an optional offline copy created
+  // by tools/vendor.py for networks that cannot reach a CDN at all.
+  three: [
+    'https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.min.js',
+    './vendor/three.module.min.js'
+  ],
   graph: [
     'https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.0/dist/3d-force-graph.min.js',
-    'https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js'
+    'https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js',
+    './vendor/3d-force-graph.min.js'
   ],
   idleDelay: 7000,       // ms of no interaction before the slow drift resumes
   flyMs: 1300,
@@ -324,18 +333,41 @@ function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&'
 
 function loadScript(urls){
   return new Promise((resolve, reject) => {
+    const tried = [];
     let i = 0;
     const next = () => {
-      if (i >= urls.length) return reject(new Error('all CDN sources failed'));
+      if (i >= urls.length) {
+        const err = new Error('could not load the 3D engine from any source');
+        err.tried = tried;
+        return reject(err);
+      }
+      const url = urls[i++];
+      tried.push(url);
       const s = document.createElement('script');
-      s.src = urls[i++];
+      s.src = url;
       s.async = false;
-      s.onload = () => resolve(s.src);
-      s.onerror = () => { s.remove(); next(); };
+      s.onload = () => { s.dataset.src = url; resolve(url); };
+      s.onerror = () => {
+        console.warn('[alfred] script not available:', url);
+        s.remove();
+        next();
+      };
       document.head.appendChild(s);
     };
     next();
   });
+}
+
+async function loadThree(){
+  for (const url of CFG.three){
+    try {
+      const mod = await import(url);
+      if (mod && mod.REVISION) return mod;
+    } catch (err){
+      console.warn('[alfred] three.js not available at', url, '-', err.message);
+    }
+  }
+  return null;
 }
 
 /* --------------------------------------------------------------- graph data */
@@ -659,8 +691,16 @@ window.addEventListener('keydown', (e) => {
 /* ------------------------------------------------------------------ boot */
 async function boot3d(){
   bootMsg.textContent = 'Loading the renderer…';
-  try { THREE = await import(CFG.three); window.THREE = THREE; }
-  catch (err){ console.warn('[alfred] shared three.js failed to load, using the copy inside the bundle', err); }
+  THREE = await loadThree();
+  if (THREE) {
+    // The bundle renders through this same instance. Importing three.js makes it
+    // set window.__THREE__, so the bundle's own bundled copy prints a one-line
+    // "Multiple instances of Three.js" warning on load. It is harmless: the
+    // internal copy is never used once window.THREE exists.
+    window.THREE = THREE;
+  } else {
+    console.warn('[alfred] no three.js available - falling back to the copy inside the bundle');
+  }
 
   const built = await loadScript(CFG.graph);
   bootMsg.textContent = 'Building the galaxy…';
@@ -784,7 +824,8 @@ async function boot3d(){
 
   // fade the boot overlay out as soon as we have actually drawn frames
   setTimeout(() => boot.classList.add('gone'), 400);
-  window.__alfred = {graph: Graph, data: GRAPH, selfTest: verifyRender, focus: setFocus, reset: clearFocus};
+  window.__alfred = {graph: Graph, data: GRAPH, selfTest: verifyRender, focus: setFocus,
+                     reset: clearFocus, loadScript, loadThree, CFG};
 }
 
 /* -- in-browser health check: is the renderer really drawing? -------------- */
@@ -899,9 +940,12 @@ form.addEventListener('submit', async (e) => {
 boot3d().catch(err => {
   console.error('[alfred] boot failed', err);
   boot.classList.remove('gone');
+  const tried = (err && err.tried || []).map(u => '<code>' + esc(u) + '</code>').join(', ');
   bootMsg.innerHTML = 'The 3D layer could not start.<br><code>' + esc(err.message || err) + '</code>' +
+    (tried ? '<br><br>Tried: ' + tried : '') +
     '<br><br>This page needs a WebGL-capable browser and one-time access to a CDN ' +
-    '(cdn.jsdelivr.net). Details are in the browser console.';
+    '(cdn.jsdelivr.net). If your network blocks CDNs, run <code>python3 tools/vendor.py</code> ' +
+    'once to keep a local copy, then reload. Details are in the browser console.';
   $('status').className = 'bad';
   $('status-text').textContent = 'boot failed';
 });

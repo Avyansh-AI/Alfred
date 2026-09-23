@@ -484,7 +484,9 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in decoded.split("/") if p not in ("", ".")]
         if any(p == ".." for p in parts):
             return self._error(HTTPStatus.FORBIDDEN, "Path traversal is not allowed.")
-        if not re.fullmatch(r"[A-Za-z0-9._\- ]*", "/".join(parts)):
+        # validate each segment on its own: the separator must not be part of the
+        # allowed character class, or subfolders inside viewer/ become unreachable
+        if not all(re.fullmatch(r"[A-Za-z0-9._\- ]+", p) for p in parts):
             return self._error(HTTPStatus.BAD_REQUEST, "Unsupported characters in path.")
         rel = "/".join(parts) or "index.html"
         target = os.path.abspath(os.path.join(root, rel))
