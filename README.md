@@ -498,6 +498,7 @@ which notes the answer really came from.
 | `config.json` | your key and model (git-ignored, created automatically if missing) |
 | `notes/` | a 12-note sample vault to show the thing off |
 | `tools/verify.sh` | one command that re-checks the indexer, the viewer, the brain and the browser |
+| `preflight.py` | the live chain against a running server: real calls, a tick or a cross per link, exit 1 if anything is red |
 | `tools/browser-check.mjs` | opens the real page in Chrome, clicks a star, asks a question, screenshots it |
 | `tools/browser.mjs` | the shared "find and launch a browser" helper both browser checks use |
 | `tools/harness.mjs` | the headless page harness: DOM, speech and recognition mocks, virtual clock |
@@ -625,6 +626,64 @@ Two things the browser console may tell you, both harmless and both expected:
 * `Multiple instances of Three.js being imported` - the page imports three.js so the bundle can
   reuse that exact instance; the bundle also carries its own copy, which stays unused.
 * `script not available: <url>` - one CDN was unreachable and the next source was tried.
+
+And when you want to know whether the thing you just changed is really live - not green in a
+suite, but live on the machine in front of you - run `preflight.py` against the server you
+have running. That is the next section.
+
+## Preflight it (the live chain)
+
+The suites above check the code. `preflight.py` checks the **running system**: the server you
+actually have up, the `config.json` you actually edited, the graph the browser is actually
+being served, a real JPEG, a real call to the model. No mocks, and it never imports the
+project - if preflight cannot see something over HTTP, neither can the browser.
+
+```bash
+python3 server.py            # in one terminal
+python3 preflight.py         # in another
+```
+
+```
+the chain, in the order it has to work
+✔ 1. server is up and serving the viewer                      GET / -> 200, text/html, 105 KB, viewer markers present
+✔ 2. graph data loads, and has nodes                          12 nodes, 22 links, every id == its index
+✔ 6. /remember writes a real file, searchable at once         wrote captures/the-preflight-probe-ydgfgh-proves.md and /chat answered from it immediately
+✔ 9. config.json is not reachable from the browser            13 traversal attempts refused by a server that answered, and the key never appeared in 25 response(s)
+```
+
+Twelve links, in the order they have to work:
+
+1. the server is up and serving the viewer; 2. the graph loads and has nodes; 3. `/chat`
+answers a real question built from a real note title, with a `nodes` array whose indexes the
+served graph actually has; 4. the key in `config.json` is valid, by one real minimal call;
+5. the model `config.json` names is one that key can reach; 6. `/remember` writes a real
+file, `/chat` finds it a second later, and the probe note is tidied away again; 7. `/see`
+answers a real JPEG sent as **the media type the served viewer actually encodes** - that
+media type is read out of the page, because a PNG probe can 400 and look exactly like a dead
+endpoint; 8. every file the browser is served is byte-identical to the file on disk; 9.
+`config.json` is not reachable from the browser - that one must fail loudly, and it prints a
+banner when it does.
+
+Then three more that exist because something actually broke here and cost an hour each: the
+running process was older than `server.py` and every other check stayed green; the viewer
+could not boot because the CDN was unreachable and `viewer/vendor/` had not been staged; a
+note dropped into `notes/` while the server was running was never seen by the brain. That is
+the rule for this file - **one check per scar**.
+
+Three marks, and one line at the end:
+
+* `✔` that link answered for itself.
+* `✗` that link is broken. The run exits 1.
+* `!` could not be proven here - no key configured, or the model is unreachable from this
+  network - or a real problem that is not fatal. The reason is printed under it.
+
+```
+preflight: 8 pass, 0 fail, 4 warn  (12 checks in 0.0s against http://127.0.0.1:4700)
+```
+
+`--url http://127.0.0.1:4711` points it somewhere else, `--json` prints one machine-readable
+object for scripts, `--keep-probe-note` leaves the `/remember` probe on disk to look at. It
+exits 0 unless something is actually red, so it can sit in front of a deploy or a "done".
 
 ## The CDN, and why three.js is pinned
 

@@ -1050,6 +1050,10 @@ class State:
             "notes_dir": self.notes_dir,
             "groups": groups,
             "model": self.model,
+            # Which brain this process is actually talking to, and which key file it
+            # read: preflight.py checks the LIVE chain, so it has to be told what the
+            # live chain is rather than guess. A URL and a path, never the key itself.
+            "api_base_url": self.base_url,
             "key": {"state": key_state(self.cfg.get("openai_api_key")), "path": self.config_path},
             "turns": len(self.history) // 2,
             "questions_asked": self.questions,
