@@ -9,6 +9,10 @@ server.py - serves the viewer and gives the galaxy a brain.
     notes/captures/, indexes it immediately and reports where to put the new star
   * POST /see : a question plus ONE frame of the user's screen, captured by the
     browser at the moment he asked, answered from the picture by the same model
+  * POST /model : change which model he is wearing, by name - "switch to Astra",
+    "try on Claude Fable 5.1", "go back to your normal brain". Runtime only: a restart
+    always goes back to the model in config.json. A name that is not exactly one of the
+    ids in KNOWN_MODEL_IDS is REFUSED, never rounded to the nearest thing
   * keeps a short conversation history server-side so follow-ups work
 
 Python 3 standard library only.
@@ -237,6 +241,71 @@ SIGHT_LINES = {
     "grab_failed": SIGHT_GRAB_FAILED_LINE,
 }
 
+# ---- when you change which brain he is wearing ------------------------------- #
+# ONE dictionary: what you say -> the real model id, with {v} where the version goes.
+# None means "the model in config.json" - that is "go back to your normal brain".
+#
+# THE RULE THAT MAKES THIS SAFE: the name you said is built into a candidate id, and the
+# candidate is looked up in KNOWN_MODEL_IDS. If it is not in that set he REFUSES, and
+# reads you back what he does have. He never falls back to the nearest match: "opus 5"
+# must not quietly become the opus you already had, because you would then spend an hour
+# testing the wrong model and never find out. An honest error beats a helpful guess.
+#
+# A family with no version spoken ("switch to opus") resolves only when exactly one id in
+# the set answers to it. Two opuses is a question, not a guess.
+SPOKEN_BRAINS = {
+    "astra":    "openai/gpt-{v}-astra",
+    "fable":    "anthropic/claude-fable-{v}",
+    "opus":     "anthropic/claude-opus-{v}",
+    "sonnet":   "anthropic/claude-sonnet-{v}",
+    "haiku":    "anthropic/claude-haiku-{v}",
+    "gpt":      "openai/gpt-{v}",
+    "gemini":   "google/gemini-{v}",
+    "grok":     "x-ai/grok-{v}",
+    "llama":    "meta-llama/llama-{v}",
+    "deepseek": "deepseek/deepseek-{v}",
+    "normal":   None,
+    "default":  None,
+}
+
+# The ids I know exist. This is the whole list: a spoken name that builds anything outside
+# it is refused, never rounded to something close. Add a line here and he can wear a new
+# brain - nowhere else in the file needs to change. The first two are the brains this
+# project runs on (config.json's own world); the rest are real OpenRouter ids, so the one
+# key in config.json reaches them today.
+KNOWN_MODEL_IDS = (
+    "openai/gpt-6-astra",
+    "anthropic/claude-fable-5.1",
+    "anthropic/claude-fable-5",
+    "anthropic/claude-opus-4.1",
+    "anthropic/claude-opus-4",
+    "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-sonnet-4",
+    "anthropic/claude-haiku-4.5",
+    "openai/gpt-5",
+    "openai/gpt-4.1",
+    "openai/gpt-4o",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "x-ai/grok-4",
+    "x-ai/grok-3",
+    "meta-llama/llama-4-maverick",
+    "deepseek/deepseek-chat",
+)
+
+# What he says when the brain changes, and what he says when it does not. {label} is the
+# brain in the chair, {id} the real id that will be sent upstream, {said} what you asked
+# for, {have} the list of what he does have, {family} the family you named on its own.
+BRAIN_SWITCHED_LINE = ("{label} is in the chair, sir - {id}. It lasts until you restart me; "
+                       "then I go back to the brain in config.json without being asked.")
+BRAIN_SAME_LINE = "{label} is already the brain in the chair, sir. Nothing has changed."
+BRAIN_RESET_LINE = "Back on {label}, sir - the brain in config.json, as the house intended."
+BRAIN_REFUSED_LINE = ("There is no {said}, sir, and I will not take the nearest thing to it. "
+                      "I have {have}.")
+BRAIN_WHICH_LINE = ("Which {family}, sir? I have {have} - name the version and I will wear it.")
+BRAIN_UNKNOWN_LINE = ("I am not acquainted with a brain called \u201c{said}\u201d, sir, so I "
+                      "have changed nothing. I can wear {have}.")
+
 
 # =========================================================================== #
 #   end of the persona - below here is machinery, not character               #
@@ -303,6 +372,8 @@ STOPWORDS = {
 }
 
 
+
+
 # --------------------------------------------------------------------------- #
 # config
 # --------------------------------------------------------------------------- #
@@ -339,6 +410,205 @@ def key_state(key: str) -> str:
     if re.search(r"put[-_ ]?your[-_ ]?key|paste[-_ ]?your|your[-_ ]?api[-_ ]?key", k, re.I):
         return "placeholder"
     return "set"
+
+
+# --------------------------------------------------------------------------- #
+# brains: a spoken name -> a real id, or a refusal
+# --------------------------------------------------------------------------- #
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# The furniture of the sentence: words that are not the name of any brain. The version
+# is whatever is left of the phrase once these and the family words have been taken out.
+BRAIN_FILLER = {
+    "a", "again", "ai", "alfred", "and", "anthropic", "as", "back", "be", "become", "bit",
+    "brain", "brains", "by", "change", "claude", "for", "go", "google", "in", "into", "it",
+    "me", "meta", "model", "models", "my", "now", "on", "onto", "openai", "original", "over",
+    "please", "put", "reset", "revert", "return", "sir", "swap", "switch", "the", "then",
+    "to", "try", "turn", "use", "usual", "version", "wear", "while", "with", "x", "you",
+    "your",
+}
+
+
+def brain_label(model_id: str) -> str:
+    """The name a person reads. Only a hyphen between two DIGITS is a version dot.
+
+    gpt-6-astra      -> GPT 6 ASTRA       (a hyphen before a word is not a dot)
+    claude-fable-5-1 -> CLAUDE FABLE 5.1  (a hyphen between two digits is)
+    """
+    name = str(model_id or "").split("/")[-1].replace("_", "-")
+    name = re.sub(r"(?<=\d)-(?=\d)", ".", name)
+    return re.sub(r"\s+", " ", name.replace("-", " ")).strip().upper()
+
+
+def _brain_parts(family: str):
+    head, _, tail = (SPOKEN_BRAINS.get(family) or "").partition("{v}")
+    return head, tail
+
+
+def brain_ids_for(family: str) -> list:
+    """Every id in KNOWN_MODEL_IDS this family's template can produce.
+
+    An id belongs to the family whose template names the most of it: "astra" keeps
+    openai/gpt-6-astra, and plain "gpt" is left with the ids that are only gpt.
+    """
+    head, tail = _brain_parts(family)
+    if not head:
+        return []
+    rx = re.compile("^" + re.escape(head) + "[^/]*" + re.escape(tail) + "$")
+    mine = [mid for mid in KNOWN_MODEL_IDS if rx.match(mid)]
+    for other in SPOKEN_BRAINS:
+        if other == family or not (SPOKEN_BRAINS.get(other) or ""):
+            continue
+        ohead, otail = _brain_parts(other)
+        if len(ohead) + len(otail) <= len(head) + len(tail):
+            continue
+        orx = re.compile("^" + re.escape(ohead) + "[^/]*" + re.escape(otail) + "$")
+        mine = [mid for mid in mine if not orx.match(mid)]
+    return mine
+
+
+def brain_versions(family: str) -> list:
+    """The versions of this family that exist, in the order the catalogue lists them."""
+    head, tail = _brain_parts(family)
+    out = []
+    for mid in brain_ids_for(family):
+        end = len(mid) - len(tail) if tail else len(mid)
+        out.append(mid[len(head):end])
+    return out
+
+
+def _and_list(items) -> str:
+    items = [str(i) for i in items if i]
+    if not items:
+        return "nothing"
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def brain_have(family: str) -> str:
+    """"opus 4.1 and opus 4" - what he does have, said the way a person says it."""
+    versions = brain_versions(family)
+    if not versions:
+        return family
+    if len(versions) == 1:
+        return "%s %s" % (family, versions[0])
+    return _and_list(["%s %s" % (family, v) for v in versions])
+
+
+def brain_families() -> str:
+    """Every family he can wear, for when the name he said is not one of them."""
+    return _and_list(sorted(k for k, v in SPOKEN_BRAINS.items() if v))
+
+
+def parse_brain(text: str) -> dict:
+    """What a spoken name means - and when it means nothing, exactly why.
+
+    The verdict is a dict: ok / reset / model / family / said / code / have / versions.
+    Nothing in here ever picks a model the person did not name: a candidate is only
+    accepted when it is exactly in KNOWN_MODEL_IDS.
+    """
+    raw = (text or "").strip()
+    low = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9./ -]+", " ", raw.lower())).strip()
+    blank = {"ok": False, "reset": False, "model": None, "family": None, "said": raw,
+             "code": "brain_empty", "have": [], "versions": []}
+    if not low:
+        blank["have"] = [brain_families()]
+        return blank
+
+    # 1. the real id, typed or said exactly: "switch to anthropic/claude-opus-4.1"
+    for mid in KNOWN_MODEL_IDS:
+        if mid.lower() in low:
+            return {"ok": True, "reset": False, "model": mid, "family": None, "said": mid,
+                    "code": "brain_id", "have": [], "versions": []}
+
+    families = [f for f, t in SPOKEN_BRAINS.items()
+                if t and re.search(r"\b%s\b" % re.escape(f), low)]
+    resets = [f for f, t in SPOKEN_BRAINS.items()
+              if t is None and re.search(r"\b%s\b" % re.escape(f), low)]
+
+    # 2. back to the brain in config.json - but only when no family was named, so that
+    #    "switch back to astra" is a switch and not a reset.
+    if not families and (resets or re.search(r"\b(back|usual|original)\b", low)):
+        return {"ok": True, "reset": True, "model": None, "family": None, "said": low,
+                "code": "brain_reset", "have": [], "versions": []}
+
+    # 3. a name that is not one of ours at all. He reads back only the name you gave -
+    #    "called banana", not "called switch to banana" - so the refusal is about the
+    #    brain, not about the sentence.
+    if not families:
+        name = " ".join(w for w in re.findall(r"[a-z0-9.]+", low) if w not in BRAIN_FILLER)
+        return {"ok": False, "reset": False, "model": None, "family": None,
+                "said": name or low, "code": "brain_unknown", "have": [brain_families()],
+                "versions": []}
+
+    # 4. the version, from whatever is left of the sentence. "fable-5-1" and "fable 5 1"
+    #    both come out as 5.1; two candidates are tried, in order, and only an exact hit
+    #    in KNOWN_MODEL_IDS counts - so a stray word after the version ("astra please")
+    #    cannot invent a model, it just falls through to the family on its own.
+    words = re.findall(r"[a-z0-9.]+", low)
+    left = [w for w in words if w not in families and w not in BRAIN_FILLER]
+    tries, seen = [], set()
+    for version in ("-".join(left), "-".join(w for w in left if re.match(r"^\d", w))):
+        version = re.sub(r"(?<=\d)-(?=\d)", ".", version).strip("-.")
+        if version and version not in seen:
+            seen.add(version)
+            tries.append(version)
+
+    for version in tries:
+        built = []
+        for fam in families:
+            candidate = (SPOKEN_BRAINS[fam] or "").replace("{v}", version)
+            if candidate in KNOWN_MODEL_IDS:
+                built.append((fam, candidate))
+        unique = {c for _, c in built}
+        if len(unique) == 1:
+            fam, candidate = built[0]
+            return {"ok": True, "reset": False, "model": candidate, "family": fam,
+                    "said": candidate, "code": "brain_switched", "have": [], "versions": []}
+        if len(unique) > 1:
+            return {"ok": False, "reset": False, "model": None, "family": families[0],
+                    "said": low, "code": "brain_which",
+                    "have": [brain_have(f) for f in families], "versions": []}
+
+    if tries:
+        # THE refusal: a family he knows, a version he does not have. He says what he has.
+        fam = families[0]
+        return {"ok": False, "reset": False, "model": None, "family": fam,
+                "said": "%s %s" % (fam, tries[0]), "code": "brain_version_unknown",
+                "have": [brain_have(f) for f in families] if len(families) > 1
+                        else [brain_have(fam)],
+                "versions": brain_versions(fam)}
+
+    # 5. a family on its own: only if exactly one id in the set answers to it
+    matches = [(fam, brain_ids_for(fam)) for fam in families]
+    single = [(fam, ids) for fam, ids in matches if len(ids) == 1]
+    if len(single) == 1:
+        fam, ids = single[0]
+        return {"ok": True, "reset": False, "model": ids[0], "family": fam, "said": ids[0],
+                "code": "brain_switched", "have": [], "versions": []}
+    fam = families[0]
+    return {"ok": False, "reset": False, "model": None, "family": fam, "said": low,
+            "code": "brain_which", "have": [brain_have(f) for f in families],
+            "versions": brain_versions(fam)}
+
+
+def check_brain_catalog():
+    """A template with no id behind it is a promise this file cannot keep."""
+    problems = []
+    for family, template in SPOKEN_BRAINS.items():
+        if template is None:
+            continue
+        if "{v}" not in template:
+            problems.append("%r has no {v} hole in it" % family)
+        elif not brain_ids_for(family):
+            problems.append("nothing in KNOWN_MODEL_IDS matches %r (%s)" % (family, template))
+    if problems:
+        raise RuntimeError("SPOKEN_BRAINS is out of step with KNOWN_MODEL_IDS: "
+                           + "; ".join(problems))
+
+
+check_brain_catalog()
 
 
 # --------------------------------------------------------------------------- #
@@ -901,24 +1171,35 @@ class BrainError(Exception):
         self.status = status
 
 
-def call_openai(cfg: dict, messages: list, base_url: str) -> str:
-    key = (cfg.get("openai_api_key") or "").strip()
-    model = (cfg.get("model") or PLACEHOLDER_MODEL).strip()
+def call_openai(messages: list, brain: dict) -> str:
+    """One real call to the brain in the chair.
+
+    `brain` is what State.brain() hands over: the id, where it goes, the key to use and
+    which file that key came from. Nothing here decides anything - the routing decision
+    was made once, in State.brain(), so a runtime swap cannot half-apply.
+    """
+    key = (brain.get("key") or "").strip()
+    model = (brain.get("model") or PLACEHOLDER_MODEL).strip()
+    base_url = (brain.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    provider = brain.get("provider") or "OpenAI"
+    key_field = brain.get("key_field") or "openai_api_key"
+    config_path = brain.get("config_path") or DEFAULT_CONFIG
 
     state = key_state(key)
     if state == "placeholder":
         raise BrainError(
             "The brain has no API key yet - config.json still holds the placeholder.",
             code="placeholder_api_key",
-            hint="Open config.json in the project root, replace PUT-YOUR-KEY-HERE with your real "
-                 "OpenAI key, then restart server.py. The key is only ever read by the server; "
-                 "it is never sent to the browser.",
+            hint="Open %s in the project root, replace %s with your %s key, then restart "
+                 "server.py. The key is only ever read by the server; it is never sent to "
+                 "the browser." % (config_path, PLACEHOLDER_KEY, provider),
         )
     if state == "missing":
         raise BrainError(
-            "config.json has no openai_api_key.",
+            "config.json has no %s." % key_field,
             code="missing_api_key",
-            hint='Add {"openai_api_key": "sk-...", "model": "%s"} to config.json and restart.' % PLACEHOLDER_MODEL,
+            hint='Add {"%s": "sk-...", "model": "%s"} to config.json and restart.'
+                 % (key_field, PLACEHOLDER_MODEL),
         )
 
     payload = {
@@ -927,17 +1208,15 @@ def call_openai(cfg: dict, messages: list, base_url: str) -> str:
         "temperature": 0.2,
         "max_tokens": 400,
     }
-    url = base_url.rstrip("/") + "/chat/completions"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer %s" % key,
-            "Content-Type": "application/json",
-            "User-Agent": "alfred-knowledge-galaxy/1.0",
-        },
-        method="POST",
-    )
+    url = base_url + "/chat/completions"
+    headers = {
+        "Authorization": "Bearer %s" % key,
+        "Content-Type": "application/json",
+        "User-Agent": "alfred-knowledge-galaxy/1.0",
+    }
+    headers.update(brain.get("headers") or {})
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                 headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             body = resp.read().decode("utf-8", "replace")
@@ -948,44 +1227,47 @@ def call_openai(cfg: dict, messages: list, base_url: str) -> str:
         except ValueError:
             msg = detail[:300] or "no detail"
         if err.code in (401, 403):
-            raise BrainError("OpenAI rejected the API key (%d): %s" % (err.code, msg),
+            raise BrainError("%s rejected the API key (%d): %s" % (provider, err.code, msg),
                              code="api_key_rejected",
-                             hint="Check that config.json holds a valid, unexpired key.")
+                             hint="Check that config.json holds a valid, unexpired key for %s."
+                                  % provider)
         if err.code == 404:
             raise BrainError('The model "%s" was not found (404): %s' % (model, msg),
                              code="model_not_found",
-                             hint="Set a model your key can access in config.json (for example gpt-4o-mini) "
-                                  "and restart server.py.")
+                             hint="%s does not have that model id. Say \u201cswitch to ...\u201d for "
+                                  "one he knows, or set a model your key can access in config.json."
+                                  % provider)
         if err.code == 429:
-            raise BrainError("OpenAI rate-limited the request (429): %s" % msg,
+            raise BrainError("%s rate-limited the request (429): %s" % (provider, msg),
                              code="rate_limited", hint="Wait a moment, or check your quota/billing.")
-        raise BrainError("OpenAI returned HTTP %d: %s" % (err.code, msg),
+        raise BrainError("%s returned HTTP %d: %s" % (provider, err.code, msg),
                          code="upstream_error", hint="Model: %s" % model)
     except urllib.error.URLError as err:
         raise BrainError("Could not reach %s (%s)." % (url, err.reason),
                          code="network_error",
-                         hint="The server needs outbound HTTPS access to the OpenAI API.")
+                         hint="The server needs outbound HTTPS access to %s." % provider)
     except (TimeoutError, socket.timeout):
-        raise BrainError("The OpenAI request timed out after %ds." % REQUEST_TIMEOUT,
+        raise BrainError("The %s request timed out after %ds." % (provider, REQUEST_TIMEOUT),
                          code="timeout", hint="Try a shorter question, or retry.")
     except OSError as err:
-        raise BrainError("Network failure talking to OpenAI: %s" % err,
+        raise BrainError("Network failure talking to %s: %s" % (provider, err),
                          code="network_error", hint="Check the sandbox/server's outbound access.")
 
     try:
         data = json.loads(body)
     except ValueError:
-        raise BrainError("OpenAI returned a response that was not JSON.", code="bad_upstream_response")
+        raise BrainError("%s returned a response that was not JSON." % provider,
+                         code="bad_upstream_response")
     if isinstance(data.get("error"), dict):
-        raise BrainError(data["error"].get("message") or "OpenAI returned an error.",
+        raise BrainError(data["error"].get("message") or "%s returned an error." % provider,
                          code="upstream_error")
     choices = data.get("choices") or []
     if not choices:
-        raise BrainError("OpenAI returned no choices.", code="empty_completion")
+        raise BrainError("%s returned no choices." % provider, code="empty_completion")
     message = choices[0].get("message") or {}
     answer = (message.get("content") or "").strip()
     if not answer:
-        raise BrainError("OpenAI returned an empty answer.", code="empty_completion")
+        raise BrainError("%s returned an empty answer." % provider, code="empty_completion")
     return answer
 
 
@@ -1006,6 +1288,10 @@ class State:
         self.frames = 0                       # frames looked at through POST /see
         self.last_frame = None                # measurements of the last one, never the pixels
         self.last_on_notes = False            # has this conversation been about the notes yet?
+        # THE SWAP. Runtime only: it is never written anywhere, so a restart always comes
+        # back on the model in config.json and no one can strand themselves on a brain
+        # they did not mean to keep.
+        self.model_override = None
         self.lock = threading.Lock()
         self.started = time.time()
         self.questions = 0
@@ -1033,8 +1319,51 @@ class State:
                 continue
 
     @property
-    def model(self):
+    def config_model(self):
+        """The brain config.json names - what a restart will always go back to."""
         return (self.cfg.get("model") or PLACEHOLDER_MODEL).strip()
+
+    @property
+    def model(self):
+        """The brain in the chair RIGHT NOW: a runtime swap if there is one."""
+        return self.model_override or self.config_model
+
+    @property
+    def swapped(self):
+        return self.model_override is not None
+
+    def brain(self, model=None):
+        """Everything one call needs: the id, where it goes, and which key opens it.
+
+        A vendor/model id - anything with a slash in it - is an OpenRouter id and goes
+        through OpenRouter with the key from config.json, so ONE key reaches any model.
+        A plain id is the OpenAI-style model config.json has always named.
+        """
+        model = (model or self.model).strip()
+        if "/" in model:
+            base = (self.args.openrouter_base_url
+                    or os.environ.get("ALFRED_OPENROUTER_BASE_URL")
+                    or self.cfg.get("openrouter_base_url")
+                    or OPENROUTER_BASE_URL)
+            field = ("openrouter_api_key"
+                     if (self.cfg.get("openrouter_api_key") or "").strip() else "openai_api_key")
+            return {"model": model, "base_url": str(base).rstrip("/"),
+                    "key": (self.cfg.get(field) or "").strip(),
+                    "provider": "OpenRouter", "key_field": field,
+                    "config_path": self.config_path,
+                    "headers": {"HTTP-Referer": "https://github.com/Avyansh-AI/Alfred",
+                                "X-Title": "Alfred - knowledge galaxy"}}
+        return {"model": model, "base_url": self.base_url,
+                "key": (self.cfg.get("openai_api_key") or "").strip(),
+                "provider": "OpenAI", "key_field": "openai_api_key",
+                "config_path": self.config_path, "headers": {}}
+
+    def wear(self, model_id):
+        """Put a different brain in the chair for this process only. Returns the old one."""
+        previous = self.model
+        with self.lock:
+            self.model_override = model_id
+        return previous
 
     def health(self, hour=None):
         groups = sorted({n["group"] for n in self.notes})
@@ -1049,11 +1378,22 @@ class State:
             "notes_source": self.source,
             "notes_dir": self.notes_dir,
             "groups": groups,
-            "model": self.model,
+            "model": self.model,                       # the brain in the chair right now
+            "model_label": brain_label(self.model),
+            "config_model": self.config_model,         # what a restart goes back to
+            "config_model_label": brain_label(self.config_model),
+            "swapped": self.swapped,                   # a runtime swap is in the chair
+            "provider": self.brain()["provider"],
+            # the catalogue the viewer shows and the chip is built from, so a model name
+            # is spelled in exactly one place (brain_label) and never in the page
+            "brains": [{"name": name, "id": mid, "label": brain_label(mid),
+                        "versions": brain_versions(name)}
+                       for name, mid in sorted(SPOKEN_BRAINS.items()) if mid],
             # Which brain this process is actually talking to, and which key file it
             # read: preflight.py checks the LIVE chain, so it has to be told what the
             # live chain is rather than guess. A URL and a path, never the key itself.
-            "api_base_url": self.base_url,
+            "api_base_url": self.brain()["base_url"],
+            "config_api_base_url": self.brain(self.config_model)["base_url"],
             "key": {"state": key_state(self.cfg.get("openai_api_key")), "path": self.config_path},
             "turns": len(self.history) // 2,
             "questions_asked": self.questions,
@@ -1200,6 +1540,11 @@ class Handler(BaseHTTPRequestHandler):
                                "GET /remember is not supported - POST a JSON body instead.",
                                'Example: curl -X POST -d \'{"text":"remember that ..."}\' '
                                'http://127.0.0.1:%d/remember' % self.server.server_address[1])
+        if path == "/model":
+            return self._error(HTTPStatus.METHOD_NOT_ALLOWED,
+                               "GET /model is not supported - POST a JSON body naming the brain.",
+                               'Example: curl -X POST -d \'{"text":"switch to astra"}\' '
+                               'http://127.0.0.1:%d/model' % self.server.server_address[1])
         if path == "/see":
             return self._error(HTTPStatus.METHOD_NOT_ALLOWED,
                                "GET /see is not supported - POST a JSON body with the question "
@@ -1217,8 +1562,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._remember()
         if path == "/see":
             return self._see()
+        if path == "/model":
+            return self._model()
         self._error(HTTPStatus.NOT_FOUND, "No such endpoint: %s" % path,
-                    "Only POST /chat, POST /remember and POST /see exist on this server.")
+                    "Only POST /chat, POST /remember, POST /see and POST /model exist on "
+                    "this server.")
 
     def do_OPTIONS(self):
         self._send(HTTPStatus.NO_CONTENT, b"", extra={"Allow": "GET, HEAD, POST, OPTIONS"})
@@ -1275,6 +1623,108 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(HTTPStatus.OK, body, ctype, {"Cache-Control": cache}, head_only)
 
     # -- growing the brain -------------------------------------------------- #
+    def _model(self):
+        """POST /model - change which brain this process is wearing, or refuse.
+
+        The refusal is the feature. A name that does not build an id in KNOWN_MODEL_IDS,
+        and a family with more than one version and no version said, both come back as a
+        refusal that lists what he does have: nothing is swapped, nothing is guessed at,
+        and the model in the chair is exactly what it was. A swap is runtime only - it is
+        never written to config.json, so a restart always goes back to the config brain.
+        """
+        state = self.state
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BODY:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "That request was too large.")
+        raw = self.rfile.read(length) if length else b""
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            return self._error(HTTPStatus.BAD_REQUEST, "Request body must be JSON.",
+                               'Send {"text": "switch to fable 5.1"}.')
+        if not isinstance(payload, dict):
+            return self._error(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object.")
+        said = (payload.get("text") or payload.get("question") or payload.get("name")
+                or payload.get("model") or payload.get("id") or "").strip()
+        if not said:
+            return self._error(HTTPStatus.BAD_REQUEST, "No brain was named.",
+                               'Send {"text": "switch to astra"} - or ask out loud, '
+                               '"go back to your normal brain".')
+        said = said[:200]
+
+        before, before_label = state.model, brain_label(state.model)
+        verdict = parse_brain(said)
+        base = {
+            "previous": before,
+            "previous_label": before_label,
+            "config_model": state.config_model,
+            "config_model_label": brain_label(state.config_model),
+            "turns": len(state.history) // 2,
+        }
+
+        def out(code, line, changed, refused=False, extra=None):
+            payload_out = {
+                "ok": not refused,
+                "changed": bool(changed),
+                "refused": bool(refused),
+                "code": code,
+                "answer": line,
+                "spoken": line,
+                "model": state.model,
+                "label": brain_label(state.model),
+                "swapped": state.swapped,
+                # the route is read AFTER the swap, so it describes the brain in the
+                # chair now, not the one that was there a moment ago
+                "provider": state.brain()["provider"],
+                "route": state.brain()["provider"].lower(),
+                "api_base_url": state.brain()["base_url"],
+                # what he understood you to name, which is not always the whole sentence:
+                # "switch to banana" is a request for "banana"
+                "said": verdict.get("said") or said,
+            }
+            payload_out.update(base)
+            payload_out.update(extra or {})
+            return self._json(HTTPStatus.OK, payload_out)
+
+        if verdict.get("code") == "brain_empty":
+            return self._error(HTTPStatus.BAD_REQUEST, "No brain was named.",
+                               'Send {"text": "switch to astra"}.')
+
+        if verdict.get("reset"):
+            state.model_override = None
+            changed = before != state.model
+            return out("brain_reset", BRAIN_RESET_LINE.format(label=brain_label(state.model)),
+                       changed)
+
+        if verdict.get("ok"):
+            target = verdict["model"]
+            if target == before:
+                return out("brain_same", BRAIN_SAME_LINE.format(label=brain_label(target)),
+                           changed=False)
+            state.wear(target)
+            return out("brain_switched",
+                       BRAIN_SWITCHED_LINE.format(label=brain_label(target), id=target),
+                       changed=True,
+                       extra={"family": verdict.get("family"),
+                              "config_model": state.config_model})
+
+        # every refusal: say what is not there, say what is, change nothing
+        code = verdict.get("code")
+        have = " / ".join(verdict.get("have") or []) or brain_families()
+        if code == "brain_version_unknown":
+            line = BRAIN_REFUSED_LINE.format(said=verdict.get("said") or said, have=have)
+        elif code == "brain_which":
+            line = BRAIN_WHICH_LINE.format(family=verdict.get("family") or "one",
+                                           have=" / ".join(verdict.get("have") or []))
+        else:
+            # the bare name, not the sentence it arrived in: the refusal quotes what you
+            # named ("banana"), never the phrasing ("switch to banana")
+            line = BRAIN_UNKNOWN_LINE.format(said=verdict.get("said") or said, have=have)
+        return out(code or "brain_unknown", line, changed=False, refused=True,
+                   extra={"family": verdict.get("family"),
+                          "have": verdict.get("have") or [],
+                          "versions": verdict.get("versions") or []})
+
     def _remember(self):
         """POST /remember - write the note, index it now, say what happened."""
         state = self.state
@@ -1467,7 +1917,7 @@ class Handler(BaseHTTPRequestHandler):
 
         state.questions += 1
         try:
-            answer = call_openai(state.cfg, messages, state.base_url)
+            answer = call_openai(messages, state.brain())
         except BrainError as err:
             # Nothing is recorded as looked at: no frame was read, so the galaxy, the
             # frame counter and the history all stay exactly as they were.
@@ -1547,7 +1997,7 @@ class Handler(BaseHTTPRequestHandler):
 
         state.questions += 1
         try:
-            answer = call_openai(state.cfg, messages, state.base_url)
+            answer = call_openai(messages, state.brain())
         except BrainError as err:
             # Retrieval still worked, so the sources come back - but there is no answer
             # to justify them, and the viewer keeps the galaxy still unless ok is true.
@@ -1604,6 +2054,8 @@ def main(argv=None):
     ap.add_argument("--graph", default=DEFAULT_GRAPH, help="generated graph-data.js (fallback source)")
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="config.json in the project root")
     ap.add_argument("--openai-base-url", default=None, help="override the OpenAI API base URL")
+    ap.add_argument("--openrouter-base-url", default=None,
+                    help="override the OpenRouter base URL (default: %s)" % OPENROUTER_BASE_URL)
     ap.add_argument("--no-create-config", action="store_true", help="never create config.json")
     args = ap.parse_args(argv)
 
@@ -1634,7 +2086,10 @@ def main(argv=None):
     print("  api key     : %s  (%s)" % (ks, state.config_path))
     if ks != "set":
         print("                -> /chat answers with a clean 'paste your key' error until this is set")
-    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember  POST /see")
+    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember  POST /see  POST /model")
+    print("  brains      : %s" % brain_families())
+    if state.swapped:
+        print("  swapped     : %s (until this process stops)" % brain_label(state.model))
     print("  ---------------------------------------------------------------")
     print("  ctrl-c to stop")
     print("")

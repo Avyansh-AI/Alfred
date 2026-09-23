@@ -25,7 +25,8 @@ export const ELEMENT_IDS = [
   'a-foot','ask-form','q','send','boot','boot-msg','key-note',
   'mic','speak-toggle','voice-status','voice-text','voice-detail',
   'sight','sight-ring','sight-badge','sight-badge-text','sight-badge-sub',
-  'a-frame','frame-shot','frame-meta'
+  'a-frame','frame-shot','frame-meta',
+  'brain-chip','brain-label','brain-temp'
 ];
 
 /* ------------------------------------------------------------- virtual clock */

@@ -10,12 +10,14 @@ a viewer served from a file that no longer matches the disk, a probe that sends 
 type the client never sends - and those are exactly what this file is for.
 
 It also never imports the app. If preflight cannot see something over HTTP, the browser
-cannot see it either.
+cannot see it either. Check 13 wears another brain for a moment (and puts the config brain
+back before it finishes) so the swap is proven for real; --no-swap skips it.
 
     python3 preflight.py                       # the server on http://127.0.0.1:4700
     python3 preflight.py --url http://127.0.0.1:4711
     python3 preflight.py --json                # one JSON object, for scripts
     python3 preflight.py --config other.json   # a config other than ./config.json
+    python3 preflight.py --no-swap             # skip check 13 (the brain swap)
 
 Marks:
 
@@ -194,6 +196,20 @@ def read_file(path: str):
             return fh.read()
     except OSError:
         return None
+
+
+def brain_label(model_id: str) -> str:
+    """The label rule, implemented here a second time on purpose: a server that stops
+    obeying it is a server whose chip lies, and this catches that.
+
+    Only a hyphen between two DIGITS is a version dot.
+
+        openai/gpt-6-astra         -> GPT 6 ASTRA
+        anthropic/claude-fable-5-1 -> CLAUDE FABLE 5.1
+    """
+    name = str(model_id or "").split("/")[-1].replace("_", "-")
+    name = re.sub(r"(?<=\d)-(?=\d)", ".", name)
+    return re.sub(r"\s+", " ", name.replace("-", " ")).strip().upper()
 
 
 def minutes(seconds: float) -> str:
@@ -423,15 +439,21 @@ def check_model(report: Report, config_path: str, health: dict, key_info: dict, 
     name = "5. the model in config.json is reachable"
     cfg = read_config(config_path)
     wanted = (cfg.get("model") or "").strip()
-    running = (health.get("model") or "").strip()
-    api_base = key_info.get("api_base") or DEFAULT_BASE_URL
+    # The CONFIG brain, not the one in the chair. A runtime swap is a legitimate state, so
+    # what has to match config.json is the model a RESTART would use - health["config_model"].
+    running = (health.get("config_model") or health.get("model") or "").strip()
+    api_base = (health.get("config_api_base_url") or key_info.get("api_base")
+                or DEFAULT_BASE_URL)
     notes = []
+    if health.get("swapped"):
+        notes.append("a runtime swap is in the chair right now (%s); a restart goes back to "
+                     "%s, and that is what this check tries" % (health.get("model"), wanted or "?"))
     if not wanted:
         report.line("fail", name, "config.json names no model",
                     ["set \"model\" explicitly, or the server silently uses its own default"])
         return
     if running and running != wanted:
-        report.line("fail", name, "the server answers as %r but config.json says %r" % (running, wanted),
+        report.line("fail", name, "a restart would use %r but config.json says %r" % (running, wanted),
                     ["the running server started before that edit - restart server.py"])
         return
     if not key_info.get("configured"):
@@ -860,6 +882,127 @@ def check_notes_agree(report: Report, health: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 13. incident: "switch to opus 5" - a near miss must never become another model
+# --------------------------------------------------------------------------- #
+def check_swap(report: Report, base: str, config_path: str, health: dict, timeout: float,
+               enabled: bool) -> None:
+    """Added with the feature it checks, 2026-09-23.
+
+    The failure this exists for: you say "opus 5", a loose matcher sees "opus", throws the
+    version away, loads an older Opus, and cheerfully announces it did what you asked - so
+    you spend an hour testing the wrong model. An honest error beats a helpful guess.
+
+    So this check insists on all four: the swap takes, the swap is runtime only (config.json
+    byte-identical), a version that is not in the set is REFUSED, and the refusal moves
+    nothing. It puts the config brain back before it returns, whatever happened.
+    """
+    name = "13. a brain swap is runtime-only, and a near-miss is refused"
+    if not enabled:
+        report.line("warn", name, "not run (--no-swap)", [])
+        return
+    brains = health.get("brains") or []
+    live, config_model = health.get("model"), health.get("config_model")
+    if not brains or live is None or config_model is None:
+        report.line("warn", name, "this server does not report its catalogue or its brains",
+                    ["it is probably older than POST /model - restart it"])
+        return
+    before_bytes = read_file(config_path)
+    if before_bytes is None:
+        report.line("warn", name, "config.json could not be read, so it cannot be compared", [])
+        return
+
+    # Build a candidate id the way the server says it does: a family plus a version, with
+    # the version put where the family's template says it goes. Then check the server really
+    # accepts that exact id. (The catalogue carries templates, not ids: /health describes
+    # what CAN be worn, and only POST /model decides what IS worn.)
+    targets = []
+    for b in brains:
+        template = b.get("id") or ""
+        if "{v}" not in template:
+            continue
+        for version in (b.get("versions") or []):
+            candidate = template.replace("{v}", version)
+            if candidate != live:
+                targets.append((b.get("name") or "", version, candidate))
+    if not targets:
+        report.line("warn", name, "the catalogue has nothing other than the current brain", [])
+        return
+    # prefer a version with a dot in it: that is the one the label rule is really about
+    family, version, target_id = next((t for t in targets if "." in t[1]), targets[0])
+    family_versions = next((b.get("versions") or [] for b in brains if b.get("name") == family), [])
+
+    notes = []
+    back = {}
+    try:
+        # 1. the swap itself, and the label the little chip will carry. The spoken name is
+        #    the family and the version, never the raw id: that is how a person would say it.
+        status, _h, body, err = post(base + "/model",
+                                     {"text": "switch to %s %s" % (family, version)}, timeout)
+        data = as_json(body) or {}
+        if status != 200 or not data.get("ok"):
+            report.line("fail", name, "POST /model could not put %s in the chair (%s)"
+                        % (target_id, data.get("code") or err or status),
+                        [str(data.get("error") or data.get("answer") or body)[:200]])
+            return
+        if data.get("model") != target_id or not data.get("swapped"):
+            report.line("fail", name, "the swap did not take: it reports %r" % data.get("model"),
+                        [json.dumps(data)[:220]])
+            return
+        want_label = brain_label(target_id)
+        if data.get("label") != want_label:
+            report.line("fail", name, "the chip would read %r, and the rule says %r"
+                        % (data.get("label"), want_label),
+                        ["only a hyphen between two digits is a version dot"])
+            return
+
+        # 2. a near miss in the same family: a version that is not in the set
+        miss = "%s 999" % family
+        status2, _h2, body2, _e2 = post(base + "/model", {"text": "switch to %s" % miss}, timeout)
+        refused = as_json(body2) or {}
+        if status2 != 200 or refused.get("ok") is not False or not refused.get("refused"):
+            report.line("fail", name, "THE NEAR MISS WAS NOT REFUSED: %r came back as %r"
+                        % (miss, refused.get("model") or refused.get("code")),
+                        ["a version that does not exist must never be rounded to one that does",
+                         json.dumps(refused)[:220]])
+            return
+        if refused.get("model") != target_id:
+            report.line("fail", name, "the refusal MOVED THE BRAIN to %r" % refused.get("model"),
+                        ["a refusal must change nothing at all"])
+            return
+        told = str(refused.get("answer") or "")
+        if family and family not in told:
+            report.line("fail", name, "the refusal does not name the family it refused", [told[:200]])
+            return
+        notes.append("\"switch to %s %s\" put %s in the chair; \"%s\" was refused: %s"
+                     % (family, version, target_id, miss, told[:130]))
+        if family_versions and not any(v in told for v in family_versions):
+            notes.append("and the refusal does not read back the versions it does have (%s)"
+                         % ", ".join(family_versions))
+    finally:
+        # always put the chair back: this check must never leave a live server on a brain
+        # that was not the person's decision
+        status3, _h3, body3, _e3 = post(base + "/model",
+                                        {"text": "go back to your normal brain"}, timeout)
+        back = as_json(body3) or {}
+        if status3 != 200 or back.get("model") != config_model:
+            report.line("fail", name, "COULD NOT PUT THE CONFIG BRAIN BACK: the server is on %r"
+                        % (back.get("model") or "?"),
+                        ["restart server.py to get back to %s" % config_model])
+            return
+
+    if read_file(config_path) != before_bytes:
+        report.line("fail", name, "THE SWAP WAS WRITTEN TO config.json",
+                    ["a restart must always come back to the brain in that file, and now it cannot"])
+        return
+    if back.get("swapped"):
+        report.line("fail", name, "the reset left a swap in place: %r" % back.get("model"), [])
+        return
+    report.line("pass", name, "%s worn and taken off; \"999\" refused without moving the chair"
+                % target_id,
+                notes + ["config.json is byte-identical after the whole thing"])
+
+
+# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
@@ -870,6 +1013,9 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=30.0, help="seconds per request (default: 30)")
     ap.add_argument("--keep-probe-note", action="store_true",
                     help="leave the /remember probe note on disk instead of removing it")
+    ap.add_argument("--no-swap", action="store_true",
+                    help="skip check 13 (it wears another brain for a moment, then puts the "
+                         "config brain back)")
     ap.add_argument("--json", action="store_true", help="print one JSON object instead of the report")
     ap.add_argument("--no-color", action="store_true", help="no colour codes")
     args = ap.parse_args(argv)
@@ -914,6 +1060,7 @@ def main(argv=None) -> int:
     check_restart(report, health)
     check_boot_dependencies(report, args.timeout)
     check_notes_agree(report, health)
+    check_swap(report, base, args.config, health, args.timeout, not args.no_swap)
 
     elapsed = time.time() - started
     total = report.passes + report.fails + report.warns

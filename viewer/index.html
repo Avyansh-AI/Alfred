@@ -80,6 +80,27 @@
   .chip .n{color:var(--dimmer)}
   #hint{margin-top:10px; font-size:10.5px; color:var(--dimmer); line-height:1.5}
   #key-note{margin-top:9px; font-size:10.5px; color:var(--warn); line-height:1.5}
+  /* the brain chip: which model is answering, small, in with the rest of the machinery.
+     Every word in it comes from the server - the viewer never spells a model name of its
+     own, because a name written down in two places is a name that will disagree. */
+  #brain-chip{
+    display:inline-flex; align-items:center; gap:6px; margin-top:9px;
+    font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:3px 9px;
+    background:rgba(255,255,255,.02); transition:.2s;
+  }
+  #brain-chip .b-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 8px var(--accent)}
+  #brain-chip b{color:var(--ink); font-weight:600}
+  #brain-chip .b-temp{color:var(--warn); font-style:normal; letter-spacing:.08em}
+  #brain-chip.swapped{border-color:rgba(255,196,107,.45)}
+  #brain-chip.swapped .b-dot{background:var(--warn); box-shadow:0 0 8px var(--warn)}
+  #brain-chip.flash{animation:brain-flash .8s ease-out 2}
+  @keyframes brain-flash{
+    0%{box-shadow:0 0 0 0 rgba(123,255,196,.5)}
+    70%{box-shadow:0 0 0 10px rgba(123,255,196,0)}
+    100%{box-shadow:0 0 0 0 rgba(123,255,196,0)}
+  }
   #key-note[hidden]{display:none}
   kbd{
     font-family:var(--mono); font-size:10px; border:1px solid var(--line); border-bottom-width:2px;
@@ -163,6 +184,8 @@
   .src.primary{color:var(--ink); border-color:rgba(123,255,196,.45); background:rgba(123,255,196,.07)}
   #answer-text.greeting{color:var(--dim); font-style:italic}
   #answer-text.captured{color:#c8ffe4}
+  #answer-text.brain{color:#c8ffe4}
+  #answer-text.brain.refused{color:var(--warn)}
   #answer-text.captured.failed{color:var(--warn)}
   .src i{width:6px;height:6px;border-radius:50%;font-style:normal}
   .src .idx{font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
@@ -333,9 +356,13 @@
   <h1>Alfred <em>&middot;</em> Knowledge Galaxy</h1>
   <p id="stats">booting&hellip;</p>
   <div id="status"><span class="dot"></span><span id="status-text">starting renderer</span></div>
+  <div id="brain-chip" title="the model answering you">
+    <span class="b-dot"></span><span>brain</span><b id="brain-label">&mdash;</b><em class="b-temp" id="brain-temp" hidden>until restart</em>
+  </div>
   <div id="legend"></div>
   <div id="hint">
     drag to orbit &middot; scroll to zoom &middot; click a star for its note &middot; <kbd>/</kbd> to ask
+    &middot; say &ldquo;switch to fable&nbsp;5.1&rdquo; for another brain
   </div>
   <div id="key-note" hidden></div>
 </div>
@@ -554,6 +581,7 @@ let shareTrack = null;         // its video track
 let shareState = 'off';        // 'off' | 'live' | 'ended'
 let shareEndedAt = 0;          // when it ended, for the "the share ended" window
 let sightLines = {};           // the character's own lines, sent by /health (never hardcoded here)
+let brainCatalog = [];         // the families he can wear, sent by /health - never hardcoded here
 let lastFrameSent = null;      // the frame the last SCREEN answer used - shown, never reused
 
 function nav(){
@@ -1454,6 +1482,9 @@ async function boot3d(){
     if (h.greeting) greet(h.greeting);
     // the character's own lines for the screen share - the viewer carries none of them
     if (h.sight && h.sight.lines) sightLines = h.sight.lines;
+    // which brain is in the chair, and every name he can wear: straight from the server
+    if (h.brains) brainCatalog = h.brains;
+    paintBrain(h);
     // notes filed since the last build.py run: the server kept them, so a reload
     // shows them too, quietly - no pulse and no camera flight at boot
     (h.captures || []).forEach(entry => {
@@ -1538,6 +1569,20 @@ async function boot3d(){
                        frameShown: () => ($('a-frame').hidden ? null : {
                          src: String($('frame-shot').src || '').slice(0, 64),
                          meta: $('frame-meta').textContent})
+                     },
+                     // which brain is answering: the chip, and the spoken-name routing
+                     brain: {
+                       label: () => ($('brain-label') ? $('brain-label').textContent : ''),
+                       chip: () => ({label: $('brain-label').textContent,
+                                     className: $('brain-chip').className || '',
+                                     swapped: $('brain-chip').classList.contains('swapped'),
+                                     flashing: $('brain-chip').classList.contains('flash'),
+                                     title: $('brain-chip').title || '',
+                                     untilRestart: !$('brain-temp').hidden}),
+                       catalog: () => brainCatalog.map(b => Object.assign({}, b)),
+                       isCommand: isBrainCommand,
+                       paint: paintBrain,
+                       submit: submitBrain
                      },
                      // growing the brain by voice: filing a note and watching it arrive
                      capture: {
@@ -2322,19 +2367,136 @@ async function submitScreen(question, options){
   }
 }
 
+/* ---------------------------------------------------------------------------
+   the brain chip, and changing which brain answers
+
+   Every string here is built by the server: the label, the id, and whether this is a
+   runtime swap. The page does not own a single model name, so the chip and the answer
+   footer can never disagree with what was actually called.
+
+   A refusal is not an error to swallow: the server sends refused: true, the line it
+   sends names what he does have, and it is shown AND spoken while the chip stays on
+   the brain that is really in the chair.
+   --------------------------------------------------------------------------- */
+function paintBrain(data){
+  const chip = $('brain-chip'), label = $('brain-label');
+  if (!chip || !label) return;
+  const id = data.model || '';
+  label.textContent = data.label || data.model_label || (id ? id.split('/').pop() : '\u2014');
+  chip.classList.toggle('swapped', !!data.swapped);
+  const temp = $('brain-temp');
+  if (temp) temp.hidden = !data.swapped;
+  const parts = ['answering with ' + (id || 'the model in config.json')];
+  if (data.swapped) parts.push('swapped at runtime - a restart returns to ' +
+    (data.config_model || 'the model in config.json'));
+  parts.push('say \u201cswitch to \u2026\u201d to change it');
+  chip.title = parts.join(' \u00b7 ');
+}
+function flashBrain(){
+  const chip = $('brain-chip');
+  if (!chip || !chip.classList) return;
+  chip.classList.remove('flash');
+  void chip.offsetWidth;                 // restart the animation, if there is one
+  chip.classList.add('flash');
+  setTimeout(() => chip.classList.remove('flash'), 1700);
+}
+
+/* The words that mean "change which brain you are wearing". This is only the ROUTING
+   decision - what the words actually mean is decided by the server, in one place. A
+   question that merely mentions a model is not a command: it must start with one of
+   these verbs, must not be a question, and the weak verbs (use / be / try) need a name
+   the catalogue actually has, so "use the movers quote" stays a question. */
+const BRAIN_VERB = /^\s*(?:please\s+)?(?:switch|swap|change|turn|put\s+on|wear|become|try(?:\s+(?:on|out))?|be|use|go\s+back|back|revert|reset|return)\b/i;
+const BRAIN_WEAK_VERB = /^\s*(?:please\s+)?(?:use|be|become|try)\b/i;
+const BRAIN_QUESTION = /^\s*(?:what|which|who|when|where|why|how|is|are|was|were|do|does|did|can|could|would|will|should|tell|show|explain)\b/i;
+function namesABrain(text){
+  if (!brainCatalog.length) return true;      // catalogue not loaded yet: let the server say
+  const low = text.toLowerCase();
+  return brainCatalog.some(b => b && b.name && new RegExp('\\b' + b.name + '\\b').test(low));
+}
+function isBrainCommand(text){
+  const t = String(text || '').trim();
+  if (!t || t.length > 90 || t.indexOf('?') >= 0) return false;
+  if (/^\s*(?:your\s+)?(?:normal|default|usual|original)\s+brain\s*$/i.test(t)) return true;
+  if (BRAIN_QUESTION.test(t)) return false;
+  if (t.split(/\s+/).length > 9) return false;
+  if (!BRAIN_VERB.test(t)) return false;
+  if (!BRAIN_WEAK_VERB.test(t)) return true;  // switch / swap / change / go back are unambiguous
+  return namesABrain(t);
+}
+
+async function submitBrain(said){
+  send.disabled = true;
+  thinking('changing brains\u2026');
+  setVoiceStatus('thinking', 'changing brains\u2026');
+  answerBox.hidden = false;
+  try {
+    const res = await fetch('/model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: said})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.error){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'the brain was not changed'};
+      renderError(data.error || `The server returned HTTP ${res.status}.`, data.hint || '');
+      await speak(data.answer || data.error || 'I could not do that, sir.');
+      return;
+    }
+    input.value = '';                    // the command has been dealt with; the bar is free
+    paintBrain(data);                    // the chip first: it is the thing you are watching
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'no notes in this'};
+    renderBrain(data);
+    if (data.changed) flashBrain();
+    await speak(data.answer || data.spoken || '');
+  } catch (err){
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'the brain was not changed'};
+    renderError('Could not reach the server.', String(err));
+    await speak('I could not reach the server, sir, so nothing was changed.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+/* The answer card, for a swap or a refusal. A refusal says so in the footer, in plain
+   words, so nobody can read a refusal as a success. */
+function renderBrain(data){
+  answerText.className = data.refused ? 'brain refused' : 'brain';
+  answerText.textContent = data.answer || '';
+  answerModel.textContent = data.model ? `\u00b7 ${data.model}` : '';
+  answerSrc.innerHTML = '';
+  hideFrame();
+  const bits = [];
+  if (data.refused) bits.push('NOT CHANGED');
+  if (data.swapped) bits.push('swapped until the next restart');
+  else bits.push('the brain in config.json');
+  if (data.refused && (data.have || []).length) bits.push('have: ' + data.have.join(' / '));
+  else if (data.model) bits.push(data.model);
+  if (data.turns != null) bits.push(`memory ${data.turns} turn${data.turns === 1 ? '' : 's'}`);
+  answerFoot.textContent = bits.join(' \u00b7 ');
+  showAnswer();
+}
+
 /* One path for both input methods: a typed question and a spoken one go through
    exactly the same /chat flow, and every answer is spoken. */
 async function submitQuestion(question){
   question = String(question || '').trim();
   if (!question || send.disabled) return;
   // The decisions, in order, before anything else happens.
-  // 1. "remember that ..." is a note, not a question - it goes to /remember.
+  // 1. "switch to astra" is a command about WHICH brain answers - not a question about
+  //    the notes and not a question about the screen. It is decided first of all, so a
+  //    brain swap works whatever else is going on, including during a screen share.
+  if (isBrainCommand(question)) return submitBrain(question);
+  // 2. "remember that ..." is a note, not a question - it goes to /remember.
   if (isRemember(question)) return submitCapture(question);
-  // 2. while a share is live, EVERY question is about the screen: it carries one frame
+  // 3. while a share is live, EVERY question is about the screen: it carries one frame
   //    taken right now and goes to /see. No keyword guessing while sharing, so a
   //    screen question can never be answered from the notes by mistake.
   if (shareState === 'live') return submitScreen(question, {reason: 'sharing'});
-  // 3. nothing is being shared and the question is plainly pointing at a screen: he says
+  // 4. nothing is being shared and the question is plainly pointing at a screen: he says
   //    so instead of answering it from the notes. "The share has ended" if he was looking
   //    at your screen a moment ago, "I have not been shown your screen" otherwise - and
   //    after the window has passed it is a normal question again, because a session that

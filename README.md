@@ -13,6 +13,12 @@ a real markdown file is written into `notes/captures/`, a new star is born in th
 (beside the note it is most related to, with a brief glow, and then the camera goes to it), and
 the very next question can be answered from it - no rebuild, no reload.
 
+You can also change which brain is answering, out loud, while it is running: **"switch to
+Astra"**, **"try on Claude Fable 5.1"**, **"go back to your normal brain"**. A small chip under
+the status line always says which model is in the chair. A version that does not exist is
+refused out loud, with the ones that do - it is never quietly rounded to the nearest match - and
+a restart always puts back the model in `config.json`.
+
 No npm. No build step. No framework. Python 3 standard library plus one CDN script.
 
 ---
@@ -441,6 +447,111 @@ The screenshots are `tools/screenshots/sight-sharing.jpg` (the ring and the badg
 sharing), `sight-answer.jpg` (the answer with the frame it came from underneath) and
 `sight-ended.jpg` (the share over, said plainly).
 
+## Change its brain by voice
+
+The model answering you is a runtime choice, not a config edit. Say it (or type it) and watch
+the small chip under the status line:
+
+| say this | what happens |
+| --- | --- |
+| **"switch to Astra"** | `openai/gpt-6-astra` takes the chair; the chip reads **GPT 6 ASTRA · UNTIL RESTART** |
+| **"try on Claude Fable 5.1"** | `anthropic/claude-fable-5.1`; the chip reads **CLAUDE FABLE 5.1 · UNTIL RESTART** |
+| **"go back to your normal brain"** | back to whatever `config.json` says, and the *until restart* marker goes out |
+
+`POST /model` does the work, and the viewer routes anything that *begins* like a command there
+before it can become a question. A couple of dozen phrasings are recognised - "change your
+brain to gpt 5", "switch to gemini 2.5 pro", "I want you to be fable 5" - and a question that
+merely mentions a model ("what did my notes say about fable 5.1?") stays a question.
+
+### The chip
+
+Small, quiet, always there: the brain currently in the chair, the route it goes by, and
+*until restart* when it is not the brain in `config.json`. Every label is generated from the
+model id by one rule, so `gpt 6-astra` and `gpt 6 astra` can never disagree on screen:
+
+> **Only a hyphen between two digits is a version dot.**
+
+`openai/gpt-6-astra` reads **GPT 6 ASTRA** (a hyphen between a digit and a word is just a
+hyphen), `anthropic/claude-fable-5-1` and `anthropic/claude-fable-5.1` both read **CLAUDE FABLE
+5.1**, and `openai/gpt-4o` reads **GPT 4O**. The page never takes a model name apart itself -
+it prints the label the server sent, which is the same function that wrote the refusal.
+
+### One dictionary, one key, any model
+
+Every spoken name lives in a single dictionary near the top of `server.py`, with `{v}` where
+the version goes:
+
+```python
+SPOKEN_BRAINS = {
+    "astra":  "openai/gpt-{v}-astra",
+    "fable":  "anthropic/claude-fable-{v}",
+    "opus":   "anthropic/claude-opus-{v}",
+    ...
+}
+```
+
+The id it builds carries a vendor (`anthropic/...`), so the call goes to **OpenRouter** using
+the same `config.json` key every other request uses. One key reaches every model on the list;
+nothing else needs configuring, and `config.json` will take an optional `openrouter_api_key`
+if you would rather keep the two separate.
+
+### The rule that makes it safe
+
+Holding the dictionary is not enough, so the server also holds **the set of model ids it knows
+exist**. A spoken name is only ever a request to *build a candidate id* - never a licence to go
+looking for the closest thing:
+
+1. "opus 5" builds the candidate `anthropic/claude-opus-5`.
+2. `anthropic/claude-opus-5` is not in the set.
+3. He **refuses**, on screen and out loud: *"There is no opus 5, sir, and I will not take the
+   nearest thing to it. I have opus 4.1 and opus 4."*
+4. Nothing changes. The chip stays on the brain that was already in the chair, the card is
+   marked `NOT CHANGED`, and no model call is spent.
+
+There is deliberately **no nearest-match path**. A loose matcher would see "opus", throw the
+version away, load something older, and cheerfully announce it did what you asked - and you
+would spend an hour testing the wrong model. *An honest error is worth more than a helpful
+guess, every single time.* A family named without a version is not guessed at either: *"Which
+opus, sir? I have opus 4.1 and opus 4 - name the version and I will wear it."*
+
+| what you said | what he does |
+| --- | --- |
+| "switch to opus" | asks which opus, lists the versions, changes nothing |
+| "switch to opus 5" | refuses, names what he does have, changes nothing |
+| "switch to banana" | "I am not acquainted with a brain called \"banana\", sir" - and lists the families he can wear |
+| "switch to fable 5.1" when already wearing it | "already the brain in the chair, sir. Nothing has changed." |
+| "switch to anthropic/claude-opus-4.1" | a full id that **is** in the set is accepted as itself |
+
+The same idea is worth carrying anywhere a build turns something a person said into something
+exact: **make the near-miss fail loudly instead of guessing.**
+
+### A restart always undoes it
+
+A swap is **runtime only**. `config.json` is read and never written; the chip says *until
+restart*; the boot banner prints the model it woke up with. Stop the server, start it again,
+and you are back on the config brain - so you can never strand yourself on a brain you did not
+mean to keep. `python3 preflight.py` proves the whole of it on the live server as check 13: it
+wears another brain, puts the config brain back, refuses a version that cannot exist, and
+compares `config.json` byte for byte before and after.
+
+### Try it yourself
+
+```bash
+python3 server.py            # then open http://127.0.0.1:4700
+```
+
+1. Say (or type) **"switch to Fable 5.1"**. The chip changes, picks up *until restart*, and he
+   tells you what he is wearing now.
+2. Ask a question: it is answered by the new brain, over the OpenRouter route. No key change
+   was needed.
+3. Say **"switch to opus 5"**. Read the refusal, then look at the chip: it has not moved.
+4. Restart the server. The chip is back on the model in `config.json`, because the file was
+   never touched.
+
+The screenshots are `tools/screenshots/brain-switched.jpg` (the chip, *until restart*),
+`brain-answering.jpg` (an answer from the swapped brain, with the real model id on the card)
+and `brain-refused.jpg` (a refusal, with the chip still where it was).
+
 ## Point it at your own notes
 
 By default it indexes `./notes`. Any folder of markdown works:
@@ -486,12 +597,20 @@ which notes the answer really came from.
   load and then overwritten by the next status update. The flag is now re-applied on every
   status write, so a muted tab says so the whole session.
 
+`tools/browser-brain-check.mjs` caught one wording bug that no assertion would have
+written by itself: the refusal for a name that is not a brain at all read back the whole
+sentence - *"I am not acquainted with a brain called \"switch to banana\""* - because the
+parser was quoting its input rather than the name it had extracted. Filler words ("switch",
+"to", "go", "back", "your", "brain") are now stripped before the name is quoted, so it says
+*"a brain called \"banana\""*. Small, and exactly the kind of thing a person notices and a
+mock never does.
+
 ## Files
 
 | path | what it is |
 | --- | --- |
 | `build.py` | the indexer. Writes `viewer/graph-data.js` as `const GRAPH = {nodes, links}` |
-| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat`, `POST /remember` and `POST /see` |
+| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat`, `POST /remember`, `POST /see` and `POST /model` |
 | `notes/captures/` | where "remember that ..." writes its notes - real markdown, indexed the moment they are written |
 | `viewer/index.html` | the whole viewer: 3d-force-graph from a CDN, starfield, HUD, side panel, ask bar |
 | `viewer/graph-data.js` | generated - rebuilt by `build.py`, never edit by hand |
@@ -507,12 +626,14 @@ which notes the answer really came from.
 | `tools/verify-capture.mjs` | "grow the brain by voice" under test: `/remember`, the birth, the glow, the links, the loud failures |
 | `tools/verify-sight.mjs` | "give it sight" under test: the held stream, the loud indicator, one frame at the ask, the type read back, the ended share |
 | `tools/browser-sight-check.mjs` | the real thing, in a real browser with a real `getDisplayMedia` share, photographed at every step |
+| `tools/verify-brain.mjs` | "change its brain by voice" under test: the chip's label, command-vs-question routing, the refusal, a swap during a live share |
+| `tools/browser-brain-check.mjs` | the swap in a real browser against the real server: the OpenRouter route is the only live one, so the swap has to be real |
 | `tools/fixtures/screen-frame.jpg` | the 640x360 screen used as a real JPEG in the python checks (11 KB, no Pillow needed) |
 | `tools/browser-capture-check.mjs` | the real thing in a real browser: file on disk, star in the running galaxy, then the follow-up question |
 | `server.py` - "THE PERSONA" | the whole character, in one commented block at the top of the file |
 | `tools/browser-voice-check.mjs` | drives the voice layer in a real browser with a speech spy and a fake mic |
 | `tools/browser-provenance-check.mjs` | the real server, the real notes, three questions, three photographs |
-| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`, `sight-*.jpg`) |
+| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`, `sight-*.jpg`, `brain-*.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -579,6 +700,26 @@ npm - which is exactly the situation this project was verified in.
   share sends nothing at all and says the share has ended, that a track which dies silently
   and a frame that never arrives are both admitted out loud, and that the character's lines
   for all of it come from `/health` rather than being hardcoded in the page.
+* `tools/verify-brain.mjs` - "change its brain by voice", headlessly: that the chip prints the
+  label the server sent and never a name the page built itself, that "switch to ..." goes to
+  `/model` while a question about a model stays a question, that a swap in a live screen share
+  reaches `/model` and not `/see` and leaves the share running, that "go back to your normal
+  brain" resets the page as well as the server, and - the point of the feature - that a refusal
+  is shown, spoken, marked `NOT CHANGED`, leaves the chip exactly where it was, and is never
+  dressed up as a success.
+* `tools/browser-brain-check.mjs` - the swap in a real browser against the real server, with a
+  trick that makes it unfakeable: the server's OpenAI base URL points at a port where nothing
+  is listening, so the only route that can answer is OpenRouter. The swap therefore has to be
+  real for an answer to come back at all. It also proves the refusal on screen and in the
+  speech engine, and finishes by restarting the real server and showing the page come up on the
+  brain in `config.json`, with the file byte-identical to how it was written.
+* `tools/verify.py` also checks the brain swap on the real server: the label rule from both
+  directions (`gpt-6-astra` -> `GPT 6 ASTRA`, `fable-5-1` and `fable-5.1` -> `CLAUDE FABLE 5.1`),
+  a swap that lands on exactly the id the name builds and routes the next question to OpenRouter
+  with the `config.json` key, the same swapped brain answering `/see`, an "opus 5" refusal that
+  spends no model call and moves nothing, `config.json` byte-identical after every one of them,
+  and a second server process that starts on the config model with no swap in sight.
+
 * `tools/browser-sight-check.mjs` - the whole thing in a real browser with a real
   `getDisplayMedia` share: a real click on the screen button, a real 1500x844 stream held
   across the page's own lifetime, a canvas encode timed against the ask (never against the
@@ -651,7 +792,7 @@ the chain, in the order it has to work
 ✔ 9. config.json is not reachable from the browser            13 traversal attempts refused by a server that answered, and the key never appeared in 25 response(s)
 ```
 
-Twelve links, in the order they have to work:
+Thirteen links, in the order they have to work:
 
 1. the server is up and serving the viewer; 2. the graph loads and has nodes; 3. `/chat`
 answers a real question built from a real note title, with a `nodes` array whose indexes the
@@ -664,11 +805,15 @@ endpoint; 8. every file the browser is served is byte-identical to the file on d
 `config.json` is not reachable from the browser - that one must fail loudly, and it prints a
 banner when it does.
 
-Then three more that exist because something actually broke here and cost an hour each: the
+Then the ones that exist because something actually broke here and cost an hour each: the
 running process was older than `server.py` and every other check stayed green; the viewer
 could not boot because the CDN was unreachable and `viewer/vendor/` had not been staged; a
-note dropped into `notes/` while the server was running was never seen by the brain. That is
-the rule for this file - **one check per scar**.
+note dropped into `notes/` while the server was running was never seen by the brain; and -
+added with the feature - a brain swap that must be runtime-only and a near-miss version that
+must be **refused rather than rounded**: it wears another brain for a moment, asks for a
+version that cannot exist, puts `config.json`'s brain back, and compares the file byte for
+byte. Unlike the others, this one changes the running system on purpose, so `--no-swap` skips
+it. That is the rule for this file - **one check per scar**.
 
 Three marks, and one line at the end:
 
@@ -678,11 +823,12 @@ Three marks, and one line at the end:
   network - or a real problem that is not fatal. The reason is printed under it.
 
 ```
-preflight: 8 pass, 0 fail, 4 warn  (12 checks in 0.0s against http://127.0.0.1:4700)
+preflight: 9 pass, 0 fail, 4 warn  (13 checks in 0.0s against http://127.0.0.1:4700)
 ```
 
 `--url http://127.0.0.1:4711` points it somewhere else, `--json` prints one machine-readable
-object for scripts, `--keep-probe-note` leaves the `/remember` probe on disk to look at. It
+object for scripts, `--keep-probe-note` leaves the `/remember` probe on disk to look at,
+`--no-swap` skips the brain-swap check. It
 exits 0 unless something is actually red, so it can sit in front of a deploy or a "done".
 
 A run spends a little of your quota on purpose - one question through `/chat`, one one-token

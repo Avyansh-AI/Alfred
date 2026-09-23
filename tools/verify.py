@@ -187,7 +187,7 @@ def main():
     print("  python       : %s" % sys.version.split()[0])
 
     # ------------------------------------------------------------------ build
-    print("\n[1/10] indexer")
+    print("\n[1/11] indexer")
     build = subprocess.run([PY, os.path.join(ROOT, "build.py"), "--check", "--quiet"],
                            cwd=ROOT, capture_output=True, text=True)
     check(build.returncode == 0, "build.py --check exits cleanly: %s" % (build.stdout.strip() or build.stderr.strip()))
@@ -227,7 +227,7 @@ def main():
         return 1
 
     # ------------------------------------------------------------------ server
-    print("\n[2/10] server + static files")
+    print("\n[2/11] server + static files")
     port = args.port or 4700
     if request("http://127.0.0.1:%d/" % port, timeout=1)[0] is not None:
         if args.port:
@@ -237,11 +237,17 @@ def main():
         print("  note  port 4700 is busy (the live server is probably up) - verifying on %d instead" % port)
 
     stub, stub_port = start_stub()
+    # A second stub stands in for OpenRouter. Same protocol, so the OpenRouter route is
+    # exercised for real: if the server sends a swap to the wrong place, this one never
+    # hears about it and the checks below fail.
+    or_stub, or_port = start_stub()
     tmpcfg = os.path.join(tempfile.mkdtemp(prefix="alfred-"), "config.json")
     with open(tmpcfg, "w") as fh:
         json.dump({"openai_api_key": "sk-stub-key-for-verification", "model": "gpt-6-astra"}, fh)
 
-    proc, banner = start_server(port, tmpcfg, ["--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port])
+    proc, banner = start_server(port, tmpcfg,
+                                ["--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port,
+                                 "--openrouter-base-url", "http://127.0.0.1:%d/v1" % or_port])
     base = "http://127.0.0.1:%d" % port
     try:
         check(proc.poll() is None, "server.py is running (pid %s)" % proc.pid)
@@ -273,7 +279,7 @@ def main():
         check("sk-stub" not in body, "/health never echoes the key itself")
 
         # everything outside viewer/ must be unreachable
-        print("\n[3/10] the server serves only viewer/")
+        print("\n[3/11] the server serves only viewer/")
         for path in ["/../config.json", "/%2e%2e/config.json", "/../server.py", "/../build.py",
                      "/..%2fconfig.json", "/../.git/config"]:
             status, _, body = request(base + path)
@@ -305,7 +311,7 @@ def main():
               "HEAD / works (proxies and previews need it)")
 
         # ----------------------------------------------------------------- brain
-        print("\n[4/10] the brain, with a stubbed OpenAI")
+        print("\n[4/11] the brain, with a stubbed OpenAI")
         status, _, body = request(base + "/chat")
         check(status == 405, "GET /chat is a clean 405, not a crash (got %s)" % status)
         status, _, body = request(base + "/chat", method="POST", payload=None)
@@ -381,7 +387,7 @@ def main():
         check(proc.poll() is None, "the server is still alive after all of that")
 
         # ------------------------------------------------------------ provenance
-        print("\n[5/10] provenance: does the server know when a question was about the notes?")
+        print("\n[5/11] provenance: does the server know when a question was about the notes?")
         def ask_prov(q):
             st, _, bd = request(base + "/chat", method="POST", payload={"question": q})
             try:
@@ -434,7 +440,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------------- the persona, and the greeting he opens with
-        print("\n[6/10] the persona and the boot greeting")
+        print("\n[6/11] the persona and the boot greeting")
         sys.path.insert(0, ROOT)
         import server as alfred_server
         src = open(os.path.join(ROOT, "server.py")).read()
@@ -508,7 +514,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------- growing the brain by voice
-        print("\n[7/10] growing the brain by voice")
+        print("\n[7/11] growing the brain by voice")
         # A throwaway copy of the real vault AND of the real viewer/graph-data.js, so
         # the ordering rules under test are the ones this project actually runs with -
         # and no test ever writes into the repo's own notes folder.
@@ -830,7 +836,7 @@ def main():
               and alfred_server.is_capture("Remember that x"),
               "only a leading 'remember' makes something a note rather than a question")
 
-        print("\n[8/10] placeholder key")
+        print("\n[8/11] placeholder key")
         ph_dir = tempfile.mkdtemp(prefix="alfred-ph-")
         ph_cfg = os.path.join(ph_dir, "config.json")
         ph_port = free_port()
@@ -887,7 +893,7 @@ def main():
             proc2.kill()
 
         # ----------------------------------------------------------------- sight
-        print("\n[9/10] sight: POST /see, one frame taken at the moment you ask")
+        print("\n[9/11] sight: POST /see, one frame taken at the moment you ask")
         # -- the viewer's half of the contract, read straight out of the file
         page = open(os.path.join(ROOT, "viewer", "index.html"), encoding="utf-8").read()
         tight = "".join(page.split())
@@ -1155,6 +1161,263 @@ def main():
             except subprocess.TimeoutExpired:
                 dproc.kill()
 
+        # ------------------------------------------------------------------ brain
+        print("\n[10/11] changing the brain by voice, and refusing near-misses")
+        import server as alfred_server
+
+        # the lines and the catalogue are character, so they live in the persona block
+        inside = src[banner:src.find("def ensure_config")]
+        for name in ("SPOKEN_BRAINS", "KNOWN_MODEL_IDS", "BRAIN_SWITCHED_LINE",
+                     "BRAIN_SAME_LINE", "BRAIN_RESET_LINE", "BRAIN_REFUSED_LINE",
+                     "BRAIN_WHICH_LINE", "BRAIN_UNKNOWN_LINE"):
+            check(name in inside, "%s lives in the persona block, with the rest of the character" % name)
+
+        # the label rule, mechanically: only a hyphen between two DIGITS is a version dot
+        check(alfred_server.brain_label("openai/gpt-6-astra") == "GPT 6 ASTRA",
+              "a hyphen between a digit and a word is not a version dot: GPT 6 ASTRA")
+        check(alfred_server.brain_label("anthropic/claude-fable-5.1") == "CLAUDE FABLE 5.1",
+              "and a version written with dots reads as itself")
+        check(alfred_server.brain_label("anthropic/claude-fable-5-1") == "CLAUDE FABLE 5.1",
+              "the same version typed with hyphens reads as 5.1, not 5-1")
+        check(alfred_server.brain_label("openai/gpt-4o") == "GPT 4O",
+              "letters after a digit stay letters: GPT 4O")
+
+        # the catalogue is one dictionary, and every promise in it has ids behind it
+        check(all(("{v}" in t) for f, t in alfred_server.SPOKEN_BRAINS.items() if t),
+              "every spoken name is a template with a version hole in it")
+        check(all(alfred_server.brain_ids_for(f) for f, t in alfred_server.SPOKEN_BRAINS.items() if t),
+              "and every family has at least one id in KNOWN_MODEL_IDS behind it")
+        check("openai/gpt-6-astra" in alfred_server.KNOWN_MODEL_IDS,
+              "the config brain is in the set of ids he knows exist")
+
+        # the parser, before any HTTP: what a spoken name means
+        v = alfred_server.parse_brain("switch to astra")
+        check(v["ok"] and v["model"] == "openai/gpt-6-astra",
+              "\"switch to Astra\" resolves to openai/gpt-6-astra: %s" % v.get("model"))
+        v = alfred_server.parse_brain("try on Claude Fable 5.1")
+        check(v["ok"] and v["model"] == "anthropic/claude-fable-5.1",
+              "\"try on Claude Fable 5.1\" resolves: %s" % v.get("model"))
+        v = alfred_server.parse_brain("go back to your normal brain")
+        check(v["ok"] and v.get("reset"), "\"go back to your normal brain\" is a reset")
+        v = alfred_server.parse_brain("switch to opus 5")
+        check(not v["ok"] and v["code"] == "brain_version_unknown" and not v.get("model"),
+              "\"opus 5\" is REFUSED and resolves to no model at all: %r" % (v.get("code"),))
+        check(v["versions"] == ["4.1", "4"],
+              "and it says which opus versions do exist: %s" % (v["versions"],))
+        check(not any(m.startswith("anthropic/claude-opus-5") for m in alfred_server.KNOWN_MODEL_IDS),
+              "the id a loose matcher would have invented is not in the set, so it cannot be worn")
+        v = alfred_server.parse_brain("switch to banana")
+        check(not v["ok"] and v["code"] == "brain_unknown" and v["said"] == "banana",
+              "a name that is not a family at all is refused, reading back just the name: %r"
+              % (v.get("said"),))
+
+        status, _, body = request(base + "/health")
+        h = json.loads(body) if status == 200 else {}
+        check(h.get("model") == "gpt-6-astra" and h.get("config_model") == "gpt-6-astra",
+              "a fresh server starts on the model in config.json: %s" % h.get("model"))
+        check(h.get("swapped") is False, "and is not marked as swapped")
+        check(h.get("model_label") == "GPT 6 ASTRA", "and the label follows the rule")
+        names = [b.get("name") for b in (h.get("brains") or [])]
+        check("astra" in names and "fable" in names and "opus" in names,
+              "the catalogue travels in /health, so the page never spells a model name: %s" % (names,))
+        check(all(b["label"] == alfred_server.brain_label(b["id"]) for b in h["brains"]),
+              "and every label in it obeys the same rule")
+
+        cfg_bytes = open(tmpcfg, "rb").read()
+        openai_calls = len(stub.calls)
+        or_calls = len(or_stub.calls)
+
+        # -- the switch itself
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to astra"})
+        d = json.loads(body) if status == 200 else {}
+        check(status == 200 and d.get("ok") and d.get("changed"),
+              "POST /model \"switch to astra\" swaps the brain (HTTP %s, %s)" % (status, d.get("code")))
+        check(d.get("model") == "openai/gpt-6-astra" and d.get("label") == "GPT 6 ASTRA",
+              "to exactly the id the name builds: %s" % d.get("model"))
+        check(d.get("route") == "openrouter" and d.get("provider") == "OpenRouter",
+              "on the OpenRouter route, because the id has a vendor in it")
+        check(str(d.get("api_base_url", "")).startswith("http://127.0.0.1:%d" % or_port),
+              "which is where the request will actually go: %s" % d.get("api_base_url"))
+        check("openai/gpt-6-astra" in d.get("answer", "") and "restart" in d.get("answer", ""),
+              "and he says which brain it is, and that a restart takes it back")
+        check(d.get("previous") == "gpt-6-astra" and d.get("config_model") == "gpt-6-astra",
+              "the config brain is still remembered, untouched")
+
+        status, _, body = request(base + "/health")
+        h2 = json.loads(body)
+        check(h2.get("model") == "openai/gpt-6-astra" and h2.get("swapped") is True,
+              "/health now reports the swapped brain")
+        check(h2.get("config_model") == "gpt-6-astra",
+              "and still reports what a restart would use: %s" % h2.get("config_model"))
+        check(open(tmpcfg, "rb").read() == cfg_bytes,
+              "THE SWAP IS RUNTIME ONLY: config.json is byte-identical on disk")
+
+        # -- the next question really does go to the new brain, by the new route
+        status, _, body = request(base + "/chat", method="POST",
+                                  payload={"question": "what did the movers quote for the road trip?"})
+        chat = json.loads(body) if status == 200 else {}
+        check(len(or_stub.calls) == or_calls + 1,
+              "the next question went to OpenRouter exactly once (%d -> %d)"
+              % (or_calls, len(or_stub.calls)))
+        check(len(stub.calls) == openai_calls, "and nothing at all went to the OpenAI endpoint")
+        check(or_stub.calls[-1]["body"]["model"] == "openai/gpt-6-astra",
+              "asking for the swapped id: %s" % or_stub.calls[-1]["body"]["model"])
+        check(or_stub.calls[-1]["auth"] == "Bearer sk-stub-key-for-verification",
+              "with the key from config.json - one key, any model: %s" % or_stub.calls[-1]["auth"])
+        check(or_stub.calls[-1]["body"].get("messages"),
+              "and a real prompt with it")
+        check(chat.get("model") == "openai/gpt-6-astra",
+              "the answer carries the brain that gave it: %s" % chat.get("model"))
+        check("STUB ANSWER from openai/gpt-6-astra" in chat.get("answer", ""),
+              "which is the model the upstream was asked for, not just what the page was told")
+
+        # -- one brain everywhere: the screen path uses the same swap
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is on this screen?",
+                                           "image": "data:image/jpeg;base64," + frame_b64,
+                                           "media_type": "image/jpeg"})
+        seen = json.loads(body) if status == 200 else {}
+        check(seen.get("model") == "openai/gpt-6-astra",
+              "a screen question is answered by the same swapped brain: %s" % seen.get("model"))
+        check(or_stub.calls[-1]["body"]["model"] == "openai/gpt-6-astra",
+              "and that is what OpenRouter was asked for")
+        img = or_stub.calls[-1]["body"]["messages"][-1]["content"][1]["image_url"]["url"]
+        check(img.startswith("data:image/jpeg;base64,") and len(img) > 1200,
+              "with the frame still attached, unchanged")
+
+        # -- THE REFUSAL. This is the check the whole feature exists for.
+        openai_calls, or_calls = len(stub.calls), len(or_stub.calls)
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to opus 5"})
+        r = json.loads(body) if status == 200 else {}
+        check(status == 200 and r.get("ok") is False and r.get("refused") is True,
+              "\"opus 5\" is refused rather than accepted (HTTP %s, %s)" % (status, r.get("code")))
+        check(r.get("code") == "brain_version_unknown",
+              "with a code that says exactly what was wrong")
+        check(r.get("have") == ["opus 4.1 and opus 4"],
+              "and the list of what he does have: %s" % (r.get("have"),))
+        check("opus 5" in r.get("answer", "") and "opus 4.1" in r.get("answer", "")
+              and "opus 4" in r.get("answer", ""),
+              "the spoken line names the miss and the alternatives: %r" % r.get("answer", "")[:110])
+        check("in the chair" not in r.get("answer", ""),
+              "and never claims to have done it")
+        check(r.get("model") == "openai/gpt-6-astra" and r.get("label") == "GPT 6 ASTRA",
+              "NOTHING CHANGED: the brain in the chair is exactly what it was: %s" % r.get("model"))
+        check(r.get("changed") is False, "and the reply says so too")
+        check(len(stub.calls) == openai_calls and len(or_stub.calls) == or_calls,
+              "a refusal spends no model call anywhere")
+        status, _, body = request(base + "/health")
+        hr = json.loads(body)
+        check(hr.get("model") == "openai/gpt-6-astra" and hr.get("swapped") is True,
+              "and /health agrees: still the swapped brain, not the nearest opus")
+
+        # -- a family on its own, and a version that is not in the family
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to opus"})
+        w = json.loads(body)
+        check(w.get("code") == "brain_which" and w.get("changed") is False
+              and w.get("have") == ["opus 4.1 and opus 4"],
+              "\"switch to opus\" asks which one rather than picking: %r" % w.get("answer", "")[:90])
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to fable 6"})
+        f6 = json.loads(body)
+        check(f6.get("code") == "brain_version_unknown" and "fable 5.1" in f6.get("answer", ""),
+              "\"fable 6\" is refused, and fable 5.1 and 5 are named instead")
+
+        # -- a version in the middle of the id, and a name that is not a family
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to gpt 6 astra"})
+        mid = json.loads(body)
+        check(mid.get("ok") is True and mid.get("model") == "openai/gpt-6-astra",
+              "\"gpt 6 astra\" builds the version in the middle of the id correctly")
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to banana"})
+        un = json.loads(body)
+        check(un.get("code") == "brain_unknown" and un.get("changed") is False
+              and "banana" in un.get("answer", ""),
+              "an unknown name is refused, quoting the name and nothing else")
+        check("astra" in (un.get("have") or [""])[0],
+              "and it lists the families he can actually wear")
+        # incident: the refusal used to quote the whole sentence you typed
+        # ("a brain called \"switch to banana\""), filler words and all
+        check("\u201cbanana\u201d" in un.get("answer", ""),
+              "the refusal quotes the NAME, not the sentence it came in: %s" % un.get("answer", "")[:90])
+        check("switch to banana" not in un.get("answer", ""),
+              "and none of the phrasing leaks into the quotation")
+        check(un.get("said") == "banana",
+              "the reply says what it thought you named: %r" % un.get("said"))
+
+        # -- a real id, typed out
+        status, _, body = request(base + "/model", method="POST",
+                                  payload={"text": "switch to anthropic/claude-opus-4.1"})
+        rid = json.loads(body)
+        check(rid.get("ok") is True and rid.get("model") == "anthropic/claude-opus-4.1",
+              "a full id that IS in the set is accepted as itself: %s" % rid.get("model"))
+
+        # -- back to the config brain
+        status, _, body = request(base + "/model", method="POST",
+                                  payload={"text": "go back to your normal brain"})
+        back = json.loads(body)
+        check(back.get("code") == "brain_reset" and back.get("model") == "gpt-6-astra"
+              and back.get("swapped") is False,
+              "\"go back to your normal brain\" returns to the config model: %s" % back.get("model"))
+        status, _, body = request(base + "/model", method="POST", payload={"text": "switch to astra"})
+        check(json.loads(body).get("changed") is True, "and the swap can be made again afterwards")
+
+        # -- a restart forgets all of it: the point of a runtime-only swap
+        fresh_port = free_port()
+        fresh_cfg = os.path.join(tempfile.mkdtemp(prefix="alfred-fresh-"), "config.json")
+        with open(fresh_cfg, "w") as fh:
+            json.dump({"openai_api_key": "sk-openai-verification",
+                       "openrouter_api_key": "sk-or-verification",
+                       "model": "anthropic/claude-opus-4.1"}, fh)
+        fproc, _fbanner = start_server(fresh_port, fresh_cfg,
+                                       ["--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port,
+                                        "--openrouter-base-url", "http://127.0.0.1:%d/v1" % or_port])
+        fbase = "http://127.0.0.1:%d" % fresh_port
+        try:
+            status, _, body = request(fbase + "/health")
+            fh_json = json.loads(body) if status == 200 else {}
+            check(fh_json.get("model") == "anthropic/claude-opus-4.1"
+                  and fh_json.get("swapped") is False,
+                  "A RESTART COMES BACK ON THE CONFIG BRAIN: a new process reports %s, not the swap"
+                  % fh_json.get("model"))
+            check(str(fh_json.get("config_api_base_url", "")).startswith("http://127.0.0.1:%d" % or_port),
+                  "a vendor/model id in config.json routes to OpenRouter by itself: %s"
+                  % fh_json.get("config_api_base_url"))
+            before = len(or_stub.calls)
+            status, _, body = request(fbase + "/chat", method="POST",
+                                      payload={"question": "what did the movers quote for the road trip?"})
+            fresh_chat = json.loads(body) if status == 200 else {}
+            check(len(or_stub.calls) == before + 1
+                  and or_stub.calls[-1]["body"]["model"] == "anthropic/claude-opus-4.1",
+                  "and the config model is what OpenRouter is asked for")
+            check(or_stub.calls[-1]["auth"] == "Bearer sk-or-verification",
+                  "an openrouter_api_key in config.json wins over the openai one when there is one: %s"
+                  % or_stub.calls[-1]["auth"])
+            check(fresh_chat.get("model") == "anthropic/claude-opus-4.1",
+                  "and the answer says so")
+        finally:
+            fproc.terminate()
+            try:
+                fproc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                fproc.kill()
+
+        check(open(tmpcfg, "rb").read() == cfg_bytes,
+              "AFTER ALL OF THAT: config.json has not been written to once")
+        status, _, body = request(base + "/model", method="POST",
+                                  payload={"text": "go back to your normal brain"})
+        check(json.loads(body).get("model") == "gpt-6-astra",
+              "and the server under test is left on the config brain for the rest of the run")
+
+        # -- the endpoint's manners
+        status, headers, body = request(base + "/model")
+        check(status == 405, "GET /model is 405, not a silent surprise (got %s)" % status)
+        check("POST" in body, "and it says to POST instead")
+        status, _, body = request(base + "/model", method="POST", payload={})
+        check(status == 400 and "brain" in body.lower(), "POST /model with nothing in it is a 400 with a hint")
+        status, _, body = request(base + "/model", method="POST", payload={"text": "   "})
+        check(status == 400, "and so is a body that is only spaces")
+        status, _, body = request(base + "/nonsense", method="POST", payload={})
+        check(status == 404 and "/model" in body,
+              "and an unknown POST path now names /model in the list of what exists")
+
     finally:
         proc.terminate()
         try:
@@ -1162,9 +1425,10 @@ def main():
         except subprocess.TimeoutExpired:
             proc.kill()
         stub.shutdown()
+        or_stub.shutdown()
 
     # ------------------------------------------------------------------ report
-    print("\n[10/10] summary")
+    print("\n[11/11] summary")
     fails = [m for state, m in results if state == "FAIL"]
     print("  %d checks, %d passed, %d failed" % (len(results), len(results) - len(fails), len(fails)))
     if fails:
