@@ -685,6 +685,10 @@ preflight: 8 pass, 0 fail, 4 warn  (12 checks in 0.0s against http://127.0.0.1:4
 object for scripts, `--keep-probe-note` leaves the `/remember` probe on disk to look at. It
 exits 0 unless something is actually red, so it can sit in front of a deploy or a "done".
 
+A run spends a little of your quota on purpose - one question through `/chat`, one one-token
+ping, one question about the frame - because a chain nobody called is exactly the chain that
+is dead.
+
 ## The CDN, and why three.js is pinned
 
 `viewer/index.html` loads `3d-force-graph@1.80.0` from jsDelivr. That bundle is built against
