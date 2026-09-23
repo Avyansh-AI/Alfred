@@ -116,9 +116,10 @@ const windowMock = {
   navigator: {userAgent: 'node-verify'},
   fetch: async (url, opts) => {
     fetchCalls.push({url, opts});
-    if (url === '/health') {
+    if (String(url).indexOf('/health') === 0) {      // the page asks /health?hour=<local hour>
       return {ok: true, status: 200, json: async () => ({
-        ok: true, notes: 12, model: 'gpt-6-astra', key: {state: 'placeholder', path: 'config.json'}, turns: 0
+        ok: true, notes: 12, model: 'gpt-6-astra', key: {state: 'placeholder', path: 'config.json'}, turns: 0,
+        greeting: 'Good evening, sir. 12 notes indexed, all present and accounted for.'
       })};
     }
     return {

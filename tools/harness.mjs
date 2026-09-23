@@ -258,7 +258,11 @@ export function patchModuleSource(){
 export async function boot(options = {}){
   const {
     search = '', voices = [], neverEnds = false, noRecognition = false,
-    fetchImpl = null, unlockSpeech = true
+    fetchImpl = null, unlockSpeech = true,
+    // what GET /health answers with. No greeting by default: pages booted for other
+    // tests should not start talking, and a greeting is a thing a test asks for on
+    // purpose (see the greeting group in verify-voice.mjs).
+    health = {ok: true, notes: 12, key: {state: 'set'}}
   } = options;
 
   const clock = makeClock();
@@ -321,6 +325,8 @@ export async function boot(options = {}){
     SpeechSynthesisUtterance: speech.Utterance,
     fetch: fetchImpl || (async (url, opts) => {
       fetchCalls.push({url, opts, body: opts && opts.body ? JSON.parse(opts.body) : null});
+      if (String(url).indexOf('/health') >= 0)
+        return {ok: true, status: 200, json: async () => health};
       return {ok: true, status: 200, json: async () => ({
         ok: true, answer: 'The movers quoted 26,000 for the road trip.',
         nodes: [7], sources: [{index: 7, label: 'Budget for the Move', score: 3}],

@@ -143,9 +143,13 @@ const spoken = await page.evaluate(() => ({
   chosen: window.__alfred.voice.chosenVoice() && window.__alfred.voice.chosenVoice().lang
 }));
 const heard = spoken.spoken.filter(t => t && t.trim());
-check(heard.length === 1, 'the answer was handed to the speech engine once (' + heard.length + ')');
-const spokeTheAnswer = heard[0] && (spoken.answer.startsWith(heard[0].slice(0, 40)) || heard[0].length > 20);
-check(spokeTheAnswer, 'what it speaks is the answer: "' + (heard[0] || '').slice(0, 60) + '…"');
+// the page greets you on load, so "the answer" is the last thing it said
+const greeting = heard.find(t => /notes indexed/.test(t)) || null;
+check(!!greeting, 'the page greeted on load: "' + (greeting || 'nothing') + '"');
+const said = greeting ? heard.filter(t => t !== greeting) : heard;
+check(said.length === 1, 'the answer was handed to the speech engine once (' + said.length + ')');
+const spokeTheAnswer = said[0] && (spoken.answer.startsWith(said[0].slice(0, 40)) || said[0].length > 20);
+check(spokeTheAnswer, 'what it speaks is the answer: "' + (said[0] || '').slice(0, 60) + '…"');
 check(spoken.chosen === 'en-GB', 'the British voice was chosen from the list (en-GB)');
 const voiced = spoken.voiced.filter(Boolean);
 check(voiced.some(v => /en-GB/.test(v)),

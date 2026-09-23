@@ -275,6 +275,55 @@ async function ask(app, question){
   check(app.speech.words().length === 2, 'the next answer still speaks after a stuck utterance is cleared');
 }
 
+/* ============================================ 11. the boot greeting (persona) */
+{
+  const line = 'Good evening, sir. 12 notes indexed, all present and accounted for.';
+  const app = await boot({
+    unlockSpeech: false,
+    health: {ok: true, notes: 12, key: {state: 'set'}, greeting: line}
+  });
+  await app.flush();
+
+  check(app.elements.get('answer-text').textContent === line,
+        'the greeting from the server is on screen at load: "' + app.elements.get('answer-text').textContent + '"');
+  check(app.elements.get('answer').hidden === false, 'and the answer box is open to hold it');
+  check(app.app.greeting().shown === true, 'the page reports that it has greeted');
+  check(app.speech.words().length === 0, 'nothing is spoken before the page has been touched, greeting included');
+  check(/first click/.test(app.app.voice.detail()),
+        'the status line says why: "' + app.app.voice.detail() + '"');
+  const healthCall = app.fetchCalls.find(c => String(c.url).indexOf('/health') >= 0);
+  check(!!healthCall && /[?&]hour=\d+/.test(healthCall.url),
+        'the page sends its own local hour: ' + (healthCall ? healthCall.url : 'no /health call'));
+  check(app.sandbox.window.GRAPH.nodes.length === 12,
+        'the graph it is drawn from holds ' + app.sandbox.window.GRAPH.nodes.length + ' nodes');
+
+  app.fireWindowEvent('pointerdown');            // the first interaction of the visit
+  await app.flush();
+  check(app.speech.words()[0] === line, 'the first click unlocks audio and the greeting is heard');
+
+  // the line, and the number in it, come from the server - never written into the page
+  const other = 'Good morning, sir. 99 notes indexed, all present and accounted for.';
+  const app2 = await boot({health: {ok: true, notes: 99, key: {state: 'set'}, greeting: other}});
+  await app2.flush();
+  check(app2.elements.get('answer-text').textContent === other,
+        'a different count is shown word for word (99 notes), so the number is not hardcoded in the viewer');
+  check(app2.speech.words()[0] === other, 'and that is what gets said');
+
+  // a question replaces the greeting, and the greeting does not come back
+  await ask(app2, 'what did the movers quote?');
+  check(!/notes indexed/.test(app2.elements.get('answer-text').textContent),
+        'an answer replaces the greeting');
+  check(app2.speech.words().filter(t => /notes indexed/.test(t)).length === 1,
+        'and the greeting is said once, not on every turn');
+
+  // a muted tab shows it and never says it
+  const app3 = await boot({search: '?mute=1', health: {ok: true, notes: 12, key: {state: 'set'}, greeting: line}});
+  await app3.flush();
+  check(app3.elements.get('answer-text').textContent === line, 'a ?mute=1 tab still shows the greeting');
+  check(app3.speech.spoken.length === 0, 'and never hands it to the speech engine (' + app3.speech.spoken.length + ' calls)');
+  check(app3.app.voice.status() === 'muted', 'the status line says muted, as always');
+}
+
 /* ------------------------------------------------------------------- report */
 console.log('\nAlfred - voice verification (virtual clock, no browser needed)');
 console.log(notes.join('\n'));

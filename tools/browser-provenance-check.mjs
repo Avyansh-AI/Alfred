@@ -225,6 +225,44 @@ const state = () => page.evaluate(() => {
 const moved = (a, b) => Math.hypot(a.camera.x - b.camera.x, a.camera.y - b.camera.y, a.camera.z - b.camera.z);
 const neat = (p) => '[x ' + p.camera.x.toFixed(0) + ', y ' + p.camera.y.toFixed(0) + ', z ' + p.camera.z.toFixed(0) + ']';
 
+/* =============================================== 0. the boot greeting, on load */
+console.log('\n0. loading the page  ->  he greets you with the real count and the time of day');
+{
+  await open();
+  const greeted = await page.evaluate(() => ({
+    shown: window.__alfred.greeting(),
+    health: null,
+    hour: new Date().getHours(),
+    nodes: (window.GRAPH && window.GRAPH.nodes || []).length,
+    spoken: (window.__speech ? window.__speech.texts : []).filter(t => t && t.trim()),
+    panelHidden: document.getElementById('answer').hidden
+  }));
+  const health = await (await fetch(URL_ + 'health?hour=' + greeted.hour)).json();
+  const expected = health.greeting;
+  const parts = {morning: [5, 12], afternoon: [12, 17], evening: [17, 5]};
+  const wanted = (greeted.hour >= 5 && greeted.hour < 12) ? 'morning'
+               : (greeted.hour >= 12 && greeted.hour < 17) ? 'afternoon' : 'evening';
+
+  check(greeted.shown.shown === true, 'the page greets on load, before anything is asked');
+  check(!greeted.panelHidden, 'and the line is on screen straight away');
+  check(greeted.shown.text === expected,
+        'it is the server\'s line, word for word: "' + greeted.shown.text + '"');
+  check(greeted.shown.text === health.greeting && health.greeting.includes(String(greeted.nodes) + ' notes'),
+        'and it carries the real note count (' + greeted.nodes + '), not a number written by hand');
+  check(health.notes === greeted.nodes,
+        'the count in the greeting is the number of nodes the galaxy is drawn from');
+  check(greeted.shown.text.startsWith('Good ' + wanted + ', sir.'),
+        'with the right part of the day for this machine\'s clock (' + greeted.hour + ':00 -> ' + wanted + ')');
+  check(greeted.spoken.length === 0, 'nothing is spoken before the first interaction - not the greeting either');
+
+  await page.click('#q');                       // the first click of the visit
+  await sleep(400);
+  const afterClick = await page.evaluate(() => (window.__speech.texts || []).filter(t => t && t.trim()));
+  check(afterClick.some(t => t === expected), 'and the first click unlocks audio, which lets the greeting be heard');
+  await page.screenshot({path: path.join(OUT, 'greeting.jpg'), type: 'jpeg', quality: 86});
+  ok('screenshot: ' + rel(path.join(OUT, 'greeting.jpg')));
+}
+
 /* ======================================================= 1. one note: it flies */
 console.log('\n1. "what is the budget for the move?"  ->  one note, so the camera flies to it');
 {
@@ -258,7 +296,8 @@ console.log('\n1. "what is the budget for the move?"  ->  one note, so the camer
   check(after.lit.length > 1, 'the note and its ' + (after.lit.length - 1) + ' neighbours are lit: [' + after.lit.join(', ') + ']');
   check(/Budget for the Move/i.test(after.panelLabel), 'which is the note that actually holds the budget');
   check(after.footer.includes('from 1 note'), 'the answer says "from 1 note": "' + after.footer + '"');
-  check(after.spoken.length === 1 && after.spoken[0] === ANSWER, 'the answer was spoken, once, and it is the answer');
+  const said = after.spoken.filter(t => !/notes indexed/.test(t));
+  check(said.length === 1 && said[0] === ANSWER, 'the answer was spoken, once, and it is the answer');
   check(after.excerpt.length > 40 && !after.spoken.join(' ').includes(after.excerpt.slice(0, 40)),
         'the note itself is never read aloud (it starts "' + after.excerpt.slice(0, 28).trim() + '...")');
   await page.screenshot({path: path.join(OUT, 'provenance-fly.jpg'), type: 'jpeg', quality: 86});
@@ -302,7 +341,8 @@ console.log('\n3. "good morning"  ->  not a question about the notes, so nothing
   check(!after.panelOpen, 'and no panel was opened');
   check(after.answer.trim() === CHAT_ANSWER, 'the answer still arrives, and it is small talk: "' +
         after.answer.trim() + '"');
-  check(after.spoken.length === 1 && after.spoken[0] === CHAT_ANSWER, 'and is still spoken, once');
+  const saidSmallTalk = after.spoken.filter(t => !/notes indexed/.test(t));
+  check(saidSmallTalk.length === 1 && saidSmallTalk[0] === CHAT_ANSWER, 'and is still spoken, once');
   check(after.footer.includes('no notes used'), 'the answer says no notes were used: "' + after.footer + '"');
   await page.screenshot({path: path.join(OUT, 'provenance-still.jpg'), type: 'jpeg', quality: 86});
   ok('screenshot: ' + rel(path.join(OUT, 'provenance-still.jpg')));

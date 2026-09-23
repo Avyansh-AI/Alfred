@@ -165,7 +165,7 @@ def main():
     print("  python       : %s" % sys.version.split()[0])
 
     # ------------------------------------------------------------------ build
-    print("\n[1/7] indexer")
+    print("\n[1/8] indexer")
     build = subprocess.run([PY, os.path.join(ROOT, "build.py"), "--check", "--quiet"],
                            cwd=ROOT, capture_output=True, text=True)
     check(build.returncode == 0, "build.py --check exits cleanly: %s" % (build.stdout.strip() or build.stderr.strip()))
@@ -205,7 +205,7 @@ def main():
         return 1
 
     # ------------------------------------------------------------------ server
-    print("\n[2/7] server + static files")
+    print("\n[2/8] server + static files")
     port = args.port or 4700
     if request("http://127.0.0.1:%d/" % port, timeout=1)[0] is not None:
         if args.port:
@@ -251,7 +251,7 @@ def main():
         check("sk-stub" not in body, "/health never echoes the key itself")
 
         # everything outside viewer/ must be unreachable
-        print("\n[3/7] the server serves only viewer/")
+        print("\n[3/8] the server serves only viewer/")
         for path in ["/../config.json", "/%2e%2e/config.json", "/../server.py", "/../build.py",
                      "/..%2fconfig.json", "/../.git/config"]:
             status, _, body = request(base + path)
@@ -283,7 +283,7 @@ def main():
               "HEAD / works (proxies and previews need it)")
 
         # ----------------------------------------------------------------- brain
-        print("\n[4/7] the brain, with a stubbed OpenAI")
+        print("\n[4/8] the brain, with a stubbed OpenAI")
         status, _, body = request(base + "/chat")
         check(status == 405, "GET /chat is a clean 405, not a crash (got %s)" % status)
         status, _, body = request(base + "/chat", method="POST", payload=None)
@@ -316,7 +316,17 @@ def main():
         system = sent["body"]["messages"][0]
         check(system["role"] == "system" and "ONLY from those notes" in system["content"],
               "the system prompt forbids answering from outside the notes")
-        check("two or three sentences" in system["content"], "the system prompt sets the answer length")
+        check("most three sentences" in system["content"], "the system prompt sets the answer length")
+        check("butler" in system["content"] and "dry" in system["content"],
+              "and it is the butler talking: dry, polite, in character")
+        check('sir' in system["content"] and "not in every sentence" in system["content"],
+              "the prompt tells him how often to say \"sir\"")
+        check("Never recite the note back" in system["content"],
+              "and never to read the note out - it is on the reader's screen")
+        check("never force a joke" in system["content"],
+              "one funny line beats three bland ones, but never forced")
+        check("Never invent a source" in system["content"],
+              "and an uncovered question gets dignity, not invention")
         user_msg = sent["body"]["messages"][-1]["content"]
         check("Notes from the user's knowledge galaxy" in user_msg, "the prompt carries the note excerpts")
         top_label = graph["nodes"][idx[0]]["label"]
@@ -349,7 +359,7 @@ def main():
         check(proc.poll() is None, "the server is still alive after all of that")
 
         # ------------------------------------------------------------ provenance
-        print("\n[5/7] provenance: does the server know when a question was about the notes?")
+        print("\n[5/8] provenance: does the server know when a question was about the notes?")
         def ask_prov(q):
             st, _, bd = request(base + "/chat", method="POST", payload={"question": q})
             try:
@@ -401,7 +411,81 @@ def main():
               "and it still gets the notes, so follow-ups keep working")
 
         # ------------------------------------------------- placeholder-key path
-        print("\n[6/7] placeholder key")
+        # ------------------------------------------------------- the persona, and the greeting he opens with
+        print("\n[6/8] the persona and the boot greeting")
+        sys.path.insert(0, ROOT)
+        import server as alfred_server
+        src = open(os.path.join(ROOT, "server.py")).read()
+        banner = src.find("T H E   P E R S O N A")
+        check(banner > 0, "the persona has its own banner comment")
+        check(banner < src.find("def ensure_config"),
+              "and it sits at the top of server.py, above every function (line %d)"
+              % (src[:banner].count(chr(10)) + 1))
+        for name in ("PERSONA", "ANSWER_STYLE", "CHAT_STYLE", "GREETING", "PARTS_OF_DAY"):
+            where = src.find("\n%s = " % name)
+            check(banner < where < src.find("def ensure_config"),
+                  "%s is defined inside the persona block (line %d)" % (name, src[:where].count(chr(10)) + 1))
+        check(banner < src.index("def part_of_day"),
+              "so are the time-of-day names and the greeting builder")
+        check(src[banner:src.find("def ensure_config")].count("def ") == 2,
+              "and the character is otherwise prose and strings, not machinery")
+
+        hours = [alfred_server.part_of_day(h) for h in range(24)]
+        check(all(h in ("morning", "afternoon", "evening") for h in hours) and len(set(hours)) == 3,
+              "every hour of the day has a part of day: %s" % ", ".join(sorted(set(hours))))
+        check(hours[8] == "morning" and hours[13] == "afternoon" and hours[21] == "evening",
+              "morning at 08:00, afternoon at 13:00, evening at 21:00")
+        check(hours[2] == "evening" and hours[23] == "evening",
+              "and a butler still says good evening at 2am")
+
+        line = alfred_server.greeting(485, 19)
+        check(line == "Good evening, sir. 485 notes indexed, all present and accounted for.",
+              "the greeting reads as the brief asks: %r" % line)
+        check("sir" in line and line.endswith("accounted for."), "with the butler's manners intact")
+        check(alfred_server.greeting(1, 9) == "Good morning, sir. One note indexed, all present and accounted for.",
+              "one note is not \"1 notes\": %r" % alfred_server.greeting(1, 9))
+
+        status, _, body = request(base + "/health?hour=8")
+        h8 = json.loads(body) if status == 200 else {}
+        check(h8.get("greeting", "").startswith("Good morning, sir."),
+              "/health answers with a morning greeting for hour=8: %r" % h8.get("greeting"))
+        status, _, body = request(base + "/health?hour=21")
+        h21 = json.loads(body) if status == 200 else {}
+        check(h21.get("greeting", "").startswith("Good evening, sir."),
+              "and an evening one for hour=21: %r" % h21.get("greeting"))
+        check(str(h21.get("notes")) in h21.get("greeting", ""),
+              "the greeting carries the real note count (%s)" % h21.get("notes"))
+        check(h21.get("notes") == len(graph["nodes"]),
+              "which is the same number of nodes the galaxy is drawn from (%d)" % len(graph["nodes"]))
+
+        # a different vault must change the number: nothing here is written by hand
+        with tempfile.TemporaryDirectory(prefix="alfred-vault-") as vault:
+            os.makedirs(os.path.join(vault, "home"))
+            for i in range(3):
+                with open(os.path.join(vault, "home", "note-%d.md" % i), "w") as fh:
+                    fh.write("# Note %d\n\nSomething about moving house, number %d.\n" % (i, i))
+            vp = free_port()
+            vcfg = os.path.join(vault, "config.json")
+            vproc, _vbanner = start_server(vp, vcfg, extra=["--notes", vault])
+            try:
+                for _ in range(100):
+                    if request("http://127.0.0.1:%d/health" % vp, timeout=2)[0]:
+                        break
+                    time.sleep(0.1)
+                status, _, body = request("http://127.0.0.1:%d/health?hour=14" % vp)
+                vh = json.loads(body) if status == 200 else {}
+                check(vh.get("notes") == 3 and vh.get("greeting") ==
+                      "Good afternoon, sir. 3 notes indexed, all present and accounted for.",
+                      "a three-note vault gets a three-note greeting: %r" % vh.get("greeting"))
+            finally:
+                vproc.terminate()
+                try:
+                    vproc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    vproc.kill()
+
+        # ------------------------------------------------- placeholder-key path
+        print("\n[7/8] placeholder key")
         ph_dir = tempfile.mkdtemp(prefix="alfred-ph-")
         ph_cfg = os.path.join(ph_dir, "config.json")
         ph_port = free_port()
@@ -466,7 +550,7 @@ def main():
         stub.shutdown()
 
     # ------------------------------------------------------------------ report
-    print("\n[7/7] summary")
+    print("\n[8/8] summary")
     fails = [m for state, m in results if state == "FAIL"]
     print("  %d checks, %d passed, %d failed" % (len(results), len(results) - len(fails), len(fails)))
     if fails:
