@@ -20,11 +20,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
-
-const HERE = path.dirname(new URL(import.meta.url).pathname);
-const ROOT = path.resolve(HERE, '..');
+import { launchBrowser, noPuppeteerMessage, ROOT } from './browser.mjs';
 
 /* ------------------------------------------------------------------- args */
 const argv = process.argv.slice(2);
@@ -36,69 +32,17 @@ const URL_ = arg('url', 'http://127.0.0.1:4700/');
 const OUT = path.resolve(arg('out', path.join(ROOT, 'tools', 'screenshots')));
 const EXE = arg('exe', null);
 const CHANNEL = arg('channel', null);
-const DEP_HINTS = (process.env.ALFRED_BROWSER_DEPS || '/tmp/browser-check')
-  .split(':').filter(Boolean);
-
-/* ------------------------------------------- resolve puppeteer-core somehow */
-function resolveAny(name) {
-  const roots = [ROOT, process.cwd(), ...DEP_HINTS];
-  for (const root of roots) {
-    try {
-      const req = createRequire(path.join(root, 'package.json'));
-      return pathToFileURL(req.resolve(name)).href;
-    } catch (_) { /* try the next root */ }
-  }
-  return null;
-}
-
-const pptrUrl = resolveAny('puppeteer-core');
-if (!pptrUrl) {
-  console.error('browser-check: puppeteer-core is not installed.');
-  console.error('  install it wherever you like and point ALFRED_BROWSER_DEPS at that folder, e.g.');
-  console.error('    mkdir -p /tmp/browser-check && cd /tmp/browser-check');
-  console.error('    npm i puppeteer-core @sparticuz/chromium');
-  console.error('    ALFRED_BROWSER_DEPS=/tmp/browser-check node tools/browser-check.mjs');
-  process.exit(2);
-}
-const puppeteer = (await import(pptrUrl)).default;
 
 /* ------------------------------------------------- a browser, from somewhere */
-let executablePath = EXE || undefined;
-let extraArgs = [];
-const chromiumUrl = resolveAny('@sparticuz/chromium');
-if (!EXE && chromiumUrl) {
-  const chromium = (await import(chromiumUrl)).default;
-  executablePath = await chromium.executablePath();
-  extraArgs = chromium.args.filter(a => a !== "--headless='shell'");
-  // the package ships the shared libraries chromium needs; it only puts them on
-  // the loader path automatically when it detects Amazon Linux
-  const libs = '/tmp/al2023/lib';
-  if (fs.existsSync(libs)) {
-    process.env.LD_LIBRARY_PATH = [libs, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':');
-    process.env.FONTCONFIG_PATH = '/tmp/fonts';
-    process.env.HOME = process.env.HOME || '/tmp';
-  } else {
-    console.log('browser-check: extracting chromium shared libraries...');
-    const { brotliDecompressSync } = await import('node:zlib');
-    const { execFileSync } = await import('node:child_process');
-    const binDir = path.join(path.dirname(chromiumUrl.replace('file://', '')), '..', 'bin');
-    for (const [file, dest] of [['al2023.tar.br', '/tmp/al2023'], ['fonts.tar.br', '/tmp/fonts']]) {
-      const tar = '/tmp/' + path.basename(file, '.br');
-      try {
-        fs.writeFileSync(tar, brotliDecompressSync(fs.readFileSync(path.join(binDir, file))));
-        fs.mkdirSync(dest, { recursive: true });
-        execFileSync('tar', ['xf', tar, '-C', dest]);
-      } catch (err) {
-        console.warn('  could not stage ' + file + ': ' + err.message);
-      }
-    }
-    if (fs.existsSync(libs)) {
-      process.env.LD_LIBRARY_PATH = [libs, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':');
-      process.env.FONTCONFIG_PATH = '/tmp/fonts';
-      process.env.HOME = process.env.HOME || '/tmp';
-    }
-  }
+const launched = await launchBrowser({ exe: EXE, channel: CHANNEL, args: ['--window-size=1600,900'] });
+if (launched.error === 'no-puppeteer'){ noPuppeteerMessage(); process.exit(2); }
+if (launched.error){
+  console.error('\nbrowser-check: could not launch a browser.');
+  console.error('  ' + launched.message);
+  console.error('  pass --exe /path/to/chrome, or --channel chrome|chromium, or install @sparticuz/chromium.');
+  process.exit(2);
 }
+const { browser } = launched;
 
 /* ------------------------------------------------------------------ report */
 const results = [];
@@ -112,20 +56,6 @@ console.log('  url        : ' + URL_);
 console.log('  output     : ' + rel(OUT) + '/');
 fs.mkdirSync(OUT, { recursive: true });
 
-let browser;
-try {
-  browser = await puppeteer.launch({
-    executablePath,
-    channel: executablePath ? undefined : (CHANNEL || undefined),
-    headless: true,
-    args: [...extraArgs, '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--window-size=1600,900']
-  });
-} catch (err) {
-  console.error('\nbrowser-check: could not launch a browser.');
-  console.error('  ' + String(err.message).split('\n')[0]);
-  console.error('  pass --exe /path/to/chrome, or --channel chrome|chromium, or install @sparticuz/chromium.');
-  process.exit(2);
-}
 ok('launched ' + await browser.version());
 
 const page = await browser.newPage();
@@ -270,6 +200,10 @@ const focusInfo = await page.evaluate(() => {
 // seconds: the fly-to tween is driven by requestAnimationFrame, and under
 // software rendering the frame rate can be low enough that a 1.3s animation
 // takes several wall-clock seconds.
+// The tween moves the camera position AND its look-at target on their own
+// curves, so waiting on the position alone can catch the moment the camera
+// arrives while the target is still swinging - the node then measures far off
+// centre even though the flight is fine a few frames later. Wait for both.
 let flew = true;
 try {
   await page.waitForFunction(() => {
@@ -277,9 +211,36 @@ try {
     const dest = g.lastFlyTo && g.lastFlyTo();
     if (!dest) return false;
     const cam = g.graph.camera().position;
-    return Math.hypot(cam.x - dest.pos.x, cam.y - dest.pos.y, cam.z - dest.pos.z) < 1.5;
+    const ctrl = g.graph.controls();
+    return Math.hypot(cam.x - dest.pos.x, cam.y - dest.pos.y, cam.z - dest.pos.z) < 1.5 &&
+           Math.hypot(ctrl.target.x - dest.target.x, ctrl.target.y - dest.target.y,
+                      ctrl.target.z - dest.target.z) < 1.5;
   }, { timeout: 30000, polling: 300 });
 } catch (err) { flew = false; }
+// Reaching the destination is not the same as the view coming to rest: focus()
+// writes controls.target straight away while the tween keeps overwriting it each
+// frame, so the projection of the focused note is still swinging. Wait until that
+// projection holds still for two samples, then measure it. A flight that ends in
+// the wrong place still fails the check below - this only removes the race.
+let atRest = true;
+try {
+  await page.waitForFunction(() => {
+    const g = window.__alfred;
+    const label = document.getElementById('panel-label').textContent;
+    const node = (g.data.nodes || []).find(n => n.label === label);
+    if (!node || node.x == null) return false;
+    const cam = g.graph.camera();
+    cam.updateMatrixWorld();
+    const v = new window.THREE.Vector3(node.x, node.y, node.z).project(cam);
+    const now = [v.x, v.y];
+    const prev = window.__alfredFramingPrev;
+    window.__alfredFramingPrev = now;
+    if (!prev) return false;
+    return Math.abs(now[0] - prev[0]) * window.innerWidth < 3 &&
+           Math.abs(now[1] - prev[1]) * window.innerHeight < 3;
+  }, { timeout: 20000, polling: 250 });
+} catch (err) { atRest = false; }
+check(atRest, 'the camera view came to rest after the flight (not still swinging)');
 check(flew, 'the camera tween ran to completion (reached the destination it recorded)');
 const clickState = await page.evaluate(() => {
   const panel = document.getElementById('panel');
