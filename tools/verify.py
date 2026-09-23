@@ -4,7 +4,8 @@ tools/verify.py - end-to-end verification of Alfred.
 
 Starts the real server.py, hits the real endpoints with the real viewer files and
 checks the whole brain path against a stub OpenAI endpoint (so no API key and no
-outbound network are needed).
+outbound network are needed) - /chat, /remember and /see, including what the model
+was actually handed for a screen question.
 
   python3 tools/verify.py            # uses ports 4700 + two ephemeral ones
   python3 tools/verify.py --port 4711
@@ -23,6 +24,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import base64
+import struct
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +73,23 @@ def request(url, method="GET", payload=None, timeout=20, headers=None):
         return err.code, dict(err.headers), err.read().decode("utf-8", "replace")
     except Exception as err:                       # connection refused etc.
         return None, {}, str(err)
+
+
+def make_png(width, height, rgb=(20, 30, 60)):
+    """A real PNG, built with the standard library - no Pillow, ever."""
+    raw = b"".join(
+        b"\x00" + b"".join(bytes(((rgb[0] + x * 3) % 256, (rgb[1] + y * 5) % 256,
+                                  (rgb[2] + x + y) % 256)) for x in range(width))
+        for y in range(height))
+
+    def chunk(tag, data):
+        payload = tag + data
+        return (struct.pack(">I", len(data)) + payload
+                + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
 # --------------------------------------------------------------------------- #
@@ -166,7 +187,7 @@ def main():
     print("  python       : %s" % sys.version.split()[0])
 
     # ------------------------------------------------------------------ build
-    print("\n[1/9] indexer")
+    print("\n[1/10] indexer")
     build = subprocess.run([PY, os.path.join(ROOT, "build.py"), "--check", "--quiet"],
                            cwd=ROOT, capture_output=True, text=True)
     check(build.returncode == 0, "build.py --check exits cleanly: %s" % (build.stdout.strip() or build.stderr.strip()))
@@ -206,7 +227,7 @@ def main():
         return 1
 
     # ------------------------------------------------------------------ server
-    print("\n[2/9] server + static files")
+    print("\n[2/10] server + static files")
     port = args.port or 4700
     if request("http://127.0.0.1:%d/" % port, timeout=1)[0] is not None:
         if args.port:
@@ -252,7 +273,7 @@ def main():
         check("sk-stub" not in body, "/health never echoes the key itself")
 
         # everything outside viewer/ must be unreachable
-        print("\n[3/9] the server serves only viewer/")
+        print("\n[3/10] the server serves only viewer/")
         for path in ["/../config.json", "/%2e%2e/config.json", "/../server.py", "/../build.py",
                      "/..%2fconfig.json", "/../.git/config"]:
             status, _, body = request(base + path)
@@ -284,7 +305,7 @@ def main():
               "HEAD / works (proxies and previews need it)")
 
         # ----------------------------------------------------------------- brain
-        print("\n[4/9] the brain, with a stubbed OpenAI")
+        print("\n[4/10] the brain, with a stubbed OpenAI")
         status, _, body = request(base + "/chat")
         check(status == 405, "GET /chat is a clean 405, not a crash (got %s)" % status)
         status, _, body = request(base + "/chat", method="POST", payload=None)
@@ -360,7 +381,7 @@ def main():
         check(proc.poll() is None, "the server is still alive after all of that")
 
         # ------------------------------------------------------------ provenance
-        print("\n[5/9] provenance: does the server know when a question was about the notes?")
+        print("\n[5/10] provenance: does the server know when a question was about the notes?")
         def ask_prov(q):
             st, _, bd = request(base + "/chat", method="POST", payload={"question": q})
             try:
@@ -413,7 +434,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------------- the persona, and the greeting he opens with
-        print("\n[6/9] the persona and the boot greeting")
+        print("\n[6/10] the persona and the boot greeting")
         sys.path.insert(0, ROOT)
         import server as alfred_server
         src = open(os.path.join(ROOT, "server.py")).read()
@@ -487,7 +508,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------- growing the brain by voice
-        print("\n[7/9] growing the brain by voice")
+        print("\n[7/10] growing the brain by voice")
         # A throwaway copy of the real vault AND of the real viewer/graph-data.js, so
         # the ordering rules under test are the ones this project actually runs with -
         # and no test ever writes into the repo's own notes folder.
@@ -809,7 +830,7 @@ def main():
               and alfred_server.is_capture("Remember that x"),
               "only a leading 'remember' makes something a note rather than a question")
 
-        print("\n[8/9] placeholder key")
+        print("\n[8/10] placeholder key")
         ph_dir = tempfile.mkdtemp(prefix="alfred-ph-")
         ph_cfg = os.path.join(ph_dir, "config.json")
         ph_port = free_port()
@@ -865,6 +886,275 @@ def main():
         except subprocess.TimeoutExpired:
             proc2.kill()
 
+        # ----------------------------------------------------------------- sight
+        print("\n[9/10] sight: POST /see, one frame taken at the moment you ask")
+        # -- the viewer's half of the contract, read straight out of the file
+        page = open(os.path.join(ROOT, "viewer", "index.html"), encoding="utf-8").read()
+        tight = "".join(page.split())
+        check('id="sight"' in page and 'id="sight-ring"' in page and 'id="sight-badge"' in page,
+              "the viewer has a screen button, a ring and a badge")
+        check("#sight-ring{position:fixed;inset:0;" in tight and "z-index:9" in tight,
+              "the ring is fixed over the whole viewport, above the graph, while sharing")
+        check("@keyframesring-pulse" in tight and "#sight-badge{position:fixed" in tight,
+              "and both of them move: a pulsing ring and a badge pinned to the top")
+        check("getDisplayMedia(" in page, "the button asks the browser for a display stream")
+        check("shareStream=stream" in tight and "shareTrack=track" in tight,
+              "and the page HOLDS that stream instead of dropping it")
+        check("constmediaType=dataUrl.slice(5," in tight and "media_type:frame.mediaType" in tight,
+              "the media type is read back off the data URL and sent as it came, never assumed")
+        check("if(!sightIsSharing()){" in tight and "awaitgrabFrame()" in tight,
+              "the frame is grabbed inside the ask, from a share that is live at that moment")
+        check("lastFrameSent" in page and "localStorage" not in page,
+              "the only frame the page keeps is the one shown under the answer - nothing is stored")
+        check("toDataURL('image/jpeg'" in tight,
+              "the canvas is asked for a JPEG at the ask")
+        check("h.sight&&h.sight.lines" in tight,
+              "the lines he says about the share come from the server, not from the page")
+
+        # -- the character's own words for it, in the persona block
+        block = src[banner:src.find("def ensure_config")]
+        for name in ("SEE_STYLE", "SEE_PROMPT", "SIGHT_LINES", "SIGHT_STARTED_LINE",
+                     "SIGHT_ENDED_LINE", "SIGHT_NEVER_LINE", "SIGHT_LOST_LINE",
+                     "SIGHT_NO_FRAME_LINE", "SIGHT_GRAB_FAILED_LINE"):
+            check(name in block, "%s lives in the persona block, with the rest of the character" % name)
+        style = alfred_server.SEE_STYLE
+        check("too small" in style and "blurry" in style,
+              "the model is told to say plainly when the frame is too small or too blurry to judge")
+        check("never guess" in style and "usually shows" in style,
+              "and never to guess or fall back on what a screen like that usually shows")
+        check("not in the frame" in style,
+              "if what you asked about is not in the frame, it says so, in those words")
+        check("ONE frame" in style and "at the moment he asked" in style,
+              "the model is told it is seeing one frame, taken when you asked")
+        check(alfred_server.SIGHT_LINES.get("no_frame") == alfred_server.SIGHT_NO_FRAME_LINE
+              and len(alfred_server.SIGHT_LINES) == 6,
+              "SIGHT_LINES is exactly the six lines he can say about a share: %s"
+              % sorted(alfred_server.SIGHT_LINES))
+
+        # -- the endpoint's manners, before a real frame is ever sent
+        status, _, see_405 = request(base + "/see")
+        check(status == 405 and "POST" in see_405, "GET /see is a clean 405, not a crash (got %s)" % status)
+        check("frame" in see_405.lower() and "/see" in see_405,
+              "and it says what a POST /see carries, so a browser mistake is easy to read")
+        status, _, body = request(base + "/see", method="POST", payload=None)
+        check(status == 400, "POST /see with no body is a clean 400 (got %s)" % status)
+        status, _, body = request(base + "/see", method="POST", payload={"other": 1},
+                                  headers={"Content-Type": "application/json"})
+        check(status == 400 and "No question" in body, "POST /see without a question is refused")
+        status, _, _ = request(base + "/see", method="POST", payload={"question": "  "},
+                               headers={"Content-Type": "application/json"})
+        check(status == 400, "a blank question is refused too (got %s)" % status)
+        status, _, body = request(base + "/seee", method="POST", payload={"question": "x"},
+                                  headers={"Content-Type": "application/json"})
+        check(status == 404 and "POST /see" in body,
+              "a mistyped endpoint is a 404 that names the real ones: %r" % body[:150])
+
+        seen_before = len(stub.calls)
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what am I looking at?"},
+                                  headers={"Content-Type": "application/json"})
+        noframe = json.loads(body) if body else {}
+        check(status == 400 and noframe.get("code") == "no_frame",
+              "a question with no frame is refused, not answered (got %s)" % status)
+        check(noframe.get("answer") == alfred_server.SIGHT_NO_FRAME_LINE,
+              "and the line he says is the character's own: %r" % (noframe.get("answer") or "")[:70])
+        check(noframe.get("decision") == "screen" and noframe.get("on_notes") is False
+              and noframe.get("nodes") == [],
+              "a refused frame still answers with the screen decision and lights nothing")
+        check(len(stub.calls) == seen_before,
+              "the brain was never asked to describe a screen it was not shown")
+
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is this?",
+                                           "image": "data:image/jpeg;base64,!!!!not base64!!!!"},
+                                  headers={"Content-Type": "application/json"})
+        check(status == 400 and "base64" in body.lower(), "a damaged frame is refused as damaged")
+
+        frame = open(os.path.join(ROOT, "tools", "fixtures", "screen-frame.jpg"), "rb").read()
+        check(len(frame) > 1024 and alfred_server.sniff_media_type(frame) == "image/jpeg"
+              and alfred_server.image_dimensions(frame, "image/jpeg") == (640, 360),
+              "the test frame is a real %d-byte JPEG of a 640x360 screen" % len(frame))
+        frame_b64 = base64.b64encode(frame).decode("ascii")
+
+        # the trap the brief warned about: what was encoded and what was declared disagree
+        png = make_png(64, 64)
+        check(len(png) > 1024 and alfred_server.sniff_media_type(png) == "image/png",
+              "the test also has a real %d-byte PNG, built with the standard library" % len(png))
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is this?",
+                                           "image": "data:image/jpeg;base64,"
+                                                    + base64.b64encode(png).decode("ascii")},
+                                  headers={"Content-Type": "application/json"})
+        mismatch = json.loads(body) if body else {}
+        check(status == 400 and mismatch.get("code") == "media_type_mismatch",
+              "a frame whose label disagrees with its bytes is refused (got %s)" % status)
+        check(mismatch.get("declared") == "image/jpeg" and mismatch.get("actual") == "image/png",
+              "and it names both, so one wrong string can never look like a dead feature: %r"
+              % (mismatch.get("error") or "")[:90])
+        check("media type" in (mismatch.get("hint") or "").lower(),
+              "with a hint about reading the type back off the encoder, which is what the viewer does")
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is this?",
+                                           "media_type": "image/png", "image": frame_b64},
+                                  headers={"Content-Type": "application/json"})
+        other = json.loads(body) if body else {}
+        check(status == 400 and other.get("code") == "media_type_mismatch"
+              and other.get("actual") == "image/jpeg",
+              "the other way round is caught as well: declared png, real jpeg")
+        check(len(stub.calls) == seen_before,
+              "neither mismatch was ever shown to the model")
+
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is this?",
+                                           "image": "data:image/gif;base64,"
+                                                    + base64.b64encode(b"GIF89a" + b"\x00" * 1200).decode("ascii")},
+                                  headers={"Content-Type": "application/json"})
+        gif = json.loads(body) if body else {}
+        check(status == 415 and gif.get("code") == "unsupported_image",
+              "a format the model cannot be shown is a clean 415 (got %s)" % status)
+        check("JPEG" in (gif.get("hint") or ""), "and the hint says what to send instead")
+
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is this?",
+                                           "image": "data:image/jpeg;base64,"
+                                                    + base64.b64encode(frame[:-2]).decode("ascii")},
+                                  headers={"Content-Type": "application/json"})
+        trunc = json.loads(body) if body else {}
+        check(status == 400 and trunc.get("code") == "frame_truncated",
+              "half a screen is worse than none: a JPEG with no end marker is refused")
+        tiny = ("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL"
+                "DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAACAAEBARE"
+                "A/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==")
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "what is this?", "image": tiny},
+                                  headers={"Content-Type": "application/json"})
+        small = json.loads(body) if body else {}
+        check(status == 400 and small.get("code") == "frame_too_small",
+              "a frame far too small to be a screen is refused, not described")
+        check(len(stub.calls) == seen_before,
+              "none of the refusals reached the brain - nothing invented to fill the gap")
+
+        # -- the real thing: a real frame, the real path, the real model
+        question = "what am I looking at?"
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": question, "image": "data:image/jpeg;base64," + frame_b64,
+                                           "media_type": "image/jpeg", "width": 640, "height": 360,
+                                           "asked_at": 1700000000, "captured_at": 1699999999},
+                                  headers={"Content-Type": "application/json"})
+        got = json.loads(body) if body else {}
+        check(status == 200 and got.get("ok") is True, "POST /see with a real frame answers 200 (got %s)" % status)
+        check(got.get("decision") == "screen" and got.get("on_notes") is False,
+              "a screen answer is never dressed up as a notes answer")
+        check(got.get("nodes") == [] and got.get("sources") == [] and got.get("read") == [],
+              "and it lights nothing in the galaxy: %s" % got.get("nodes"))
+        check(got.get("frame", {}).get("media_type") == "image/jpeg"
+              and got.get("frame", {}).get("bytes") == len(frame),
+              "the frame is reported back with its real type and size: %s" % got.get("frame", {}))
+        check(got["frame"].get("width") == 640 and got["frame"].get("height") == 360,
+              "its size is read out of the image itself, not taken on trust")
+        check(got["frame"].get("asked_at") == 1700000000 and got["frame"].get("captured_at") == 1699999999,
+              "the moment you asked and the moment it was captured both travel with it")
+        check(got["frame"].get("question") == question, "and the question it was answered for")
+        check(got.get("frames_looked_at") == 1, "the server counts one frame looked at: %s"
+              % got.get("frames_looked_at"))
+        check(got.get("model") == "gpt-6-astra",
+              "the same model from config.json answered: %s" % got.get("model"))
+        check((got.get("answer") or "").startswith("STUB ANSWER from gpt-6-astra"),
+              "the stub answered through the usual path: %r" % (got.get("answer") or "")[:60])
+
+        call = stub.calls[-1]
+        msgs = call["body"].get("messages", [])
+        check(call["body"].get("model") == "gpt-6-astra",
+              "the request to the brain carried the configured model")
+        check(msgs and msgs[0].get("role") == "system" and msgs[0].get("content") == alfred_server.SEE_PROMPT,
+              "the system message IS the sight prompt, persona and all")
+        check("too small" in msgs[0]["content"] and "blurry" in msgs[0]["content"]
+              and "never guess" in msgs[0]["content"],
+              "so the model was told, in the request itself, to admit what it cannot judge")
+        last = msgs[-1] if msgs else {}
+        parts = last.get("content")
+        check(last.get("role") == "user" and isinstance(parts, list) and parts[0].get("text") == question,
+              "the last message is your question, word for word")
+        img = parts[1].get("image_url", {}).get("url", "") if isinstance(parts, list) and len(parts) > 1 else ""
+        check(img.startswith("data:image/jpeg;base64,"),
+              "the frame travelled as a data URL with the type the bytes really are")
+        check(img.partition(",")[2] and base64.b64decode(img.partition(",")[2]) == frame,
+              "THE PICTURE THE MODEL SAW IS THE FRAME THAT WAS SENT, byte for byte (%d bytes)" % len(frame))
+        check(parts[1]["image_url"].get("detail") == "high",
+              "and it was sent at high detail, because screen text is small")
+        check("The movers quoted 26,000" not in json.dumps(msgs),
+              "no note excerpts travelled with the screen question: he answers from the frame only")
+
+        status, _, body = request(base + "/health")
+        health = json.loads(body) if status == 200 else {}
+        sight = health.get("sight") or {}
+        check(sight.get("frames") == 1 and (sight.get("last_frame") or {}).get("bytes") == len(frame),
+              "/health.sight counts the frames and the last one's measurements")
+        check((sight.get("last_frame") or {}).get("width") == 640
+              and (sight.get("last_frame") or {}).get("question") == question,
+              "with its size and the question, so the state is auditable")
+        check("data:image" not in body and "base64" not in body and '"image"' not in body,
+              "/health carries measurements only - never a pixel of your screen")
+        check(sight.get("lines") == alfred_server.SIGHT_LINES,
+              "and the lines the page will say are served from the persona block")
+        check(sight.get("media_types") == ["image/jpeg", "image/png", "image/webp"]
+              and sight.get("max_edge") == 8192 and sight.get("min_bytes") == 1024,
+              "and it publishes the rules it enforces: %s" % sight.get("media_types"))
+
+        status, _, body = request(base + "/see", method="POST",
+                                  payload={"question": "and what is on the right?",
+                                           "image": "data:image/jpeg;base64," + frame_b64},
+                                  headers={"Content-Type": "application/json"})
+        second = json.loads(body) if body else {}
+        check(status == 200 and second.get("frames_looked_at") == 2,
+              "a second question takes a second look, and the count follows")
+        check(second.get("frame", {}).get("asked_at") is None
+              and "asked_at" in (second.get("frame") or {}),
+              "a frame sent without the times still says so rather than inventing them")
+        status, _, body = request(base + "/chat", method="POST",
+                                  payload={"question": "what did the movers quote for the road trip?"},
+                                  headers={"Content-Type": "application/json"})
+        after = json.loads(body) if status == 200 else {}
+        check(status == 200 and after.get("on_notes") is True and len(after.get("nodes") or []) > 0,
+              "and the notes path is untouched: /chat still reads the notes and lights the galaxy")
+
+        # -- nothing read lasts: a brain failure must not count a frame it never saw
+        dead_port = free_port()
+        dead_cfg = os.path.join(tempfile.mkdtemp(prefix="alfred-dead-"), "config.json")
+        with open(dead_cfg, "w") as fh:
+            json.dump({"openai_api_key": "sk-stub-key-for-verification", "model": "gpt-6-astra"}, fh)
+        dport = free_port()
+        dproc, _dban = start_server(dport, dead_cfg,
+                                    ["--openai-base-url", "http://127.0.0.1:%d/v1" % dead_port])
+        dbase = "http://127.0.0.1:%d" % dport
+        try:
+            status, _, body = request(dbase + "/see", method="POST",
+                                      payload={"question": "what am I looking at?",
+                                               "image": "data:image/jpeg;base64," + frame_b64},
+                                      headers={"Content-Type": "application/json"})
+            broke = json.loads(body) if body else {}
+            check(status == 200 and broke.get("ok") is False,
+                  "a brain that cannot be reached is reported, not papered over (HTTP %s)" % status)
+            check(broke.get("code") == "network_error" and broke.get("hint"),
+                  "with a code and a hint for whoever has to fix it: %r" % (broke.get("code"),))
+            check("answer" in broke and broke.get("answer"), "and he says something about it out loud")
+            check(broke.get("nodes") == [] and broke.get("on_notes") is False,
+                  "with no sources claimed for an answer that never arrived")
+            status, _, body = request(dbase + "/health")
+            dh = json.loads(body) if status == 200 else {}
+            check((dh.get("sight") or {}).get("frames") == 0
+                  and (dh.get("sight") or {}).get("last_frame") is None,
+                  "NOTHING READ LASTS: a frame that was never looked at is not counted or kept")
+            status, _, body = request(dbase + "/health")
+            dh2 = json.loads(body) if status == 200 else {}
+            check((dh2.get("turns") or 0) == 0, "and no turn was recorded either")
+        finally:
+            dproc.terminate()
+            try:
+                dproc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dproc.kill()
+
     finally:
         proc.terminate()
         try:
@@ -874,7 +1164,7 @@ def main():
         stub.shutdown()
 
     # ------------------------------------------------------------------ report
-    print("\n[9/9] summary")
+    print("\n[10/10] summary")
     fails = [m for state, m in results if state == "FAIL"]
     print("  %d checks, %d passed, %d failed" % (len(results), len(results) - len(fails), len(fails)))
     if fails:

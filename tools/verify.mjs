@@ -59,7 +59,8 @@ function makeEl(id, tag = 'div') {
     removeEventListener() {},
     getBoundingClientRect() { return {left: 0, top: 0, width: 1440, height: 900, right: 1440, bottom: 900}; },
     focus() {}, blur() {}, onclick: null,
-    getAttribute() { return null; }, setAttribute(k, v) { this[k] = v; }
+    getAttribute() { return null; }, setAttribute(k, v) { this[k] = v; },
+    removeAttribute() {}, src: ''
   };
   elements.set(id, el);
   return el;
@@ -72,6 +73,13 @@ let fetchCalls = [];
 
 const documentMock = {
   createElement(tag) {
+    if (tag === 'video') {
+      const v = makeEl('video-' + Math.random().toString(36).slice(2), 'video');
+      v.srcObject = null; v.videoWidth = 0; v.videoHeight = 0; v.readyState = 0;
+      v.play = async () => { v.readyState = 4; };
+      v.pause = () => {}; v.removeAttribute = () => {};
+      return v;
+    }
     if (tag === 'canvas') {
       const canvas = makeEl('canvas-' + canvases.length, 'canvas');
       canvas.width = canvas.height = 0;
@@ -113,13 +121,24 @@ const windowMock = {
   requestAnimationFrame: (fn) => { rafQueue.push(fn); return rafQueue.length; },
   innerWidth: 1440, innerHeight: 900, devicePixelRatio: 2,
   location: {href: 'http://127.0.0.1:4700/', origin: 'http://127.0.0.1:4700'},
-  navigator: {userAgent: 'node-verify'},
+  navigator: {userAgent: 'node-verify',
+              mediaDevices: {getDisplayMedia: async () => {
+                const track = {kind: 'video', readyState: 'live', label: 'screen:node-verify',
+                               stop() { this.readyState = 'ended'; }};
+                return {oninactive: null, getVideoTracks: () => [track], getTracks: () => [track]};
+              }}},
   fetch: async (url, opts) => {
     fetchCalls.push({url, opts});
     if (String(url).indexOf('/health') === 0) {      // the page asks /health?hour=<local hour>
       return {ok: true, status: 200, json: async () => ({
         ok: true, notes: 12, model: 'gpt-6-astra', key: {state: 'placeholder', path: 'config.json'}, turns: 0,
-        greeting: 'Good evening, sir. 12 notes indexed, all present and accounted for.'
+        greeting: 'Good evening, sir. 12 notes indexed, all present and accounted for.',
+        sight: {frames: 0, last_frame: null, media_types: ['image/jpeg', 'image/png', 'image/webp'],
+                lines: {started: 'Watching your screen now, sir.', ended: 'The screen share has ended, sir.',
+                        never: 'I have not been shown your screen yet, sir.',
+                        lost: 'The share is no longer sending a picture, sir.',
+                        no_frame: 'Nothing came with that question, sir.',
+                        grab_failed: 'I could not take a picture of your screen, sir.'}}
       })};
     }
     return {
@@ -259,7 +278,9 @@ check(code.includes('await loadScript(CFG.graph)'),
 ['stage','grade','hud','stats','status','status-text','legend','hint','panel','panel-close',
  'panel-label','panel-group','panel-body','panel-excerpt','neigh-title','panel-neighbours',
  'panel-meta','ask-wrap','answer','a-who','a-model','a-close','answer-text','answer-sources',
- 'a-foot','ask-form','q','send','boot','boot-msg','key-note'].forEach(id => makeEl(id));
+ 'a-foot','ask-form','q','send','boot','boot-msg','key-note',
+ 'sight','sight-ring','sight-badge','sight-badge-text','sight-badge-sub',
+ 'a-frame','frame-shot','frame-meta'].forEach(id => makeEl(id));
 
 const mock = buildMock();
 const sandbox = {window: windowMock, document: documentMock, console, setTimeout, clearTimeout,

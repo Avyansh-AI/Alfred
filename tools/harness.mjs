@@ -23,7 +23,9 @@ export const ELEMENT_IDS = [
   'panel-label','panel-group','panel-body','panel-excerpt','neigh-title','panel-neighbours',
   'panel-meta','ask-wrap','answer','a-who','a-model','a-close','answer-text','answer-sources',
   'a-foot','ask-form','q','send','boot','boot-msg','key-note',
-  'mic','speak-toggle','voice-status','voice-text','voice-detail'
+  'mic','speak-toggle','voice-status','voice-text','voice-detail',
+  'sight','sight-ring','sight-badge','sight-badge-text','sight-badge-sub',
+  'a-frame','frame-shot','frame-meta'
 ];
 
 /* ------------------------------------------------------------- virtual clock */
@@ -100,7 +102,8 @@ export function makeDom(){
         _s: new Set(),
         add(...c){ c.forEach(x => this._s.add(x)); },
         remove(...c){ c.forEach(x => this._s.delete(x)); },
-        contains(c){ return this._s.has(c); }
+        contains(c){ return this._s.has(c); },
+        toggle(c, on){ (on === undefined ? !this._s.has(c) : !!on) ? this._s.add(c) : this._s.delete(c); }
       },
       set innerHTML(v){ this._html = v; },
       get innerHTML(){ return this._html || ''; },
@@ -274,6 +277,80 @@ export function makeRecognitionMock({ clock, unsupported = false }){
   return state;
 }
 
+/* ------------------------------------------------------------------- a screen
+ * A stand-in for getDisplayMedia: the shape the viewer really meets (a stream with a
+ * video track, readyState, onended) plus a queue of frames that the canvas mock hands
+ * back from toDataURL(). Tests use it to drive the capture path - changing the frames
+ * between questions is how "the frame is taken now, never cached" gets proved.
+ */
+export function makeScreenMock({ frames = null, unsupported = false, deny = false,
+                                 videoWidth = 1280, videoHeight = 720 } = {}){
+  const state = {
+    streams: [], tracks: [], ended: 0, stopped: 0, asked: 0, got: 0,
+    frames: frames ? [...frames] : [],
+    served: [],                       // the data URLs actually handed to the page
+    videoWidth, videoHeight, deny, unsupported,
+    next(){                          // one frame per toDataURL call, in order
+      if (!state.frames.length) return tinyFrame(state.got++);
+      const f = state.frames.shift();
+      state.frames.push(f);           // cycle, so a long test never runs dry
+      return f;
+    }
+  };
+  if (unsupported) return state;
+  state.getDisplayMedia = async (constraints) => {
+    state.asked++;
+    state.constraints = constraints;
+    if (deny){
+      const err = new Error('Permission denied');
+      err.name = 'NotAllowedError';
+      throw err;
+    }
+    const track = {
+      kind: 'video', label: 'screen:mock:0', readyState: 'live',
+      onended: null, muted: false, enabled: true,
+      stop(){ this.readyState = 'ended'; state.stopped++; },
+      getSettings: () => ({width: state.videoWidth, height: state.videoHeight, frameRate: 30}),
+      addEventListener(){}, removeEventListener(){}
+    };
+    const stream = {
+      id: 'mock-stream-' + state.streams.length, active: true,
+      oninactive: null,
+      getVideoTracks: () => [track],
+      getTracks: () => [track],
+      getAudioTracks: () => [],
+      addEventListener(){}, removeEventListener(){}
+    };
+    state.streams.push(stream);
+    state.tracks.push(track);
+    return stream;
+  };
+  state.end = (i = -1) => {                  // the browser's own "Stop sharing"
+    const t = state.tracks.at(i);
+    if (!t) return false;
+    state.ended++;
+    t.readyState = 'ended';
+    if (typeof t.onended === 'function') t.onended();
+    return true;
+  };
+  state.kill = (i = -1) => {                 // the track dies with no event at all
+    const t = state.tracks.at(i);
+    if (t) t.readyState = 'ended';
+    return !!t;
+  };
+  return state;
+}
+
+/* A real 2x2 JPEG, so an encoded frame is genuinely a JPEG even in the harness. */
+export const TINY_JPEG = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL' +
+  'DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAACAAEBAREA/8QAFAABAAAAAAAAAAAAAAAA' +
+  'AAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
+export function tinyFrame(n = 0){
+  // every frame is a real JPEG; the padding keeps them different from one another, so
+  // a test can tell "this question's frame" from "the last question's frame"
+  return TINY_JPEG + (n ? '/*' + n + '*/' : '');
+}
+
 /* A dull but valid answer to POST /remember: the real tests pass their own fetchImpl. */
 export function defaultCapture(health = {}){
   const i = (health && health.notes) || GRAPH_DATA.nodes.length;
@@ -294,6 +371,19 @@ export function defaultCapture(health = {}){
   };
 }
 
+/* A dull but valid answer to POST /see, on the same pattern. */
+export function defaultSee(health = {}){
+  const sight = (health && health.sight) || {};
+  const line = sight.lines || {};
+  return {
+    ok: true, decision: 'screen', on_notes: false, nodes: [], sources: [], read: [],
+    answer: 'That is a dark screen with a few windows open, sir, and nothing in it looks wrong.',
+    frame: {media_type: 'image/jpeg', bytes: 2048, width: 1280, height: 720, at: Math.floor(Date.now() / 1000)},
+    model: 'stub-model', turns: 1,
+    lines: line
+  };
+}
+
 /* ------------------------------------------------------------------- boot it */
 export function patchModuleSource(){
   const m = HTML.match(/<script type="module">([\s\S]*?)<\/script>/);
@@ -307,7 +397,7 @@ export function patchModuleSource(){
 export async function boot(options = {}){
   const {
     search = '', voices = [], neverEnds = false, noRecognition = false,
-    fetchImpl = null, unlockSpeech = true,
+    fetchImpl = null, unlockSpeech = true, screen = null,
     // what GET /health answers with. No greeting by default: pages booted for other
     // tests should not start talking, and a greeting is a thing a test asks for on
     // purpose (see the greeting group in verify-voice.mjs).
@@ -321,8 +411,39 @@ export async function boot(options = {}){
   const canvases = [];
   const documentMock = {
     createElement(tag){
+      if (tag === 'video'){
+        // a video element fed by a stream: readyState/videoWidth appear as soon as it
+        // "plays", which is what the capture path waits for
+        const v = makeEl('video-' + Math.random().toString(36).slice(2), 'video');
+        v.srcObject = null; v.muted = false; v.paused = true;
+        v.videoWidth = 0; v.videoHeight = 0; v.readyState = 0;
+        v.play = async () => {
+          screenMock.got++;
+          v.paused = false;
+          if (v.srcObject){
+            const t = v.srcObject.getVideoTracks()[0];
+            if (t && t.readyState === 'live'){
+              v.videoWidth = screenMock.videoWidth;
+              v.videoHeight = screenMock.videoHeight;
+              v.readyState = 4;
+            }
+          }
+          return undefined;
+        };
+        v.pause = () => { v.paused = true; };
+        v.removeAttribute = () => {};
+        return v;
+      }
       if (tag === 'canvas'){
         const c = makeEl('canvas-' + canvases.length, 'canvas');
+        c.width = 0; c.height = 0;
+        // the encoder: hands back a real JPEG data URL, one per call
+        c.toDataURL = (type = 'image/jpeg', quality) => {
+          const url = screenMock.next();
+          screenMock.served.push({url, type, quality, width: c.width, height: c.height});
+          return url;
+        };
+        c.removeAttribute = () => {};
         c.getContext = () => new Proxy({}, {
           get(_t, p){
             if (p === 'createRadialGradient') return () => ({addColorStop(){}});
@@ -342,6 +463,7 @@ export async function boot(options = {}){
 
   const windowEvents = {};
   const speech = makeSpeechMock({voices, neverEnds, clock});
+  const screenMock = makeScreenMock(screen === null ? {} : screen);
   const recognition = makeRecognitionMock({clock, unsupported: noRecognition});
   const fetchCalls = [];
 
@@ -354,7 +476,9 @@ export async function boot(options = {}){
     requestAnimationFrame: (fn) => clock.setTimeout(() => fn(clock.now()), 16),
     innerWidth: 1440, innerHeight: 900, devicePixelRatio: 1,
     location: {href: 'http://127.0.0.1:4700/' + search, search: navSearch(search), origin: 'http://127.0.0.1:4700'},
-    navigator: {userAgent: 'alfred-harness'},
+    navigator: {userAgent: 'alfred-harness',
+                mediaDevices: screenMock.unsupported ? undefined
+                             : {getDisplayMedia: screenMock.getDisplayMedia}},
     performance: {now: () => clock.now()},
     speechSynthesis: speech.synth,
     SpeechSynthesisUtterance: speech.Utterance,
@@ -378,6 +502,8 @@ export async function boot(options = {}){
         return {ok: true, status: 200, json: async () => health};
       if (String(url).indexOf('/remember') >= 0)
         return {ok: true, status: 200, json: async () => defaultCapture(health)};
+      if (String(url).indexOf('/see') >= 0)
+        return {ok: true, status: 200, json: async () => defaultSee(health)};
       return {ok: true, status: 200, json: async () => ({
         ok: true, answer: 'The movers quoted 26,000 for the road trip.',
         nodes: [7], sources: [{index: 7, label: 'Budget for the Move', score: 3}],
@@ -412,7 +538,7 @@ export async function boot(options = {}){
   };
 
   const api = {clock, elements, sandbox, context, windowMock, windowEvents, documentMock,
-               speech, recognition, fetchCalls, graph, three, flush,
+               speech, recognition, fetchCalls, graph, three, flush, screen: screenMock,
                chatCalls(){ return fetchCalls.filter(c => c.url === '/chat'); },
                rememberCalls(){ return fetchCalls.filter(c => c.url === '/remember'); },
                fireWindowEvent(type){ (windowEvents[type] || []).forEach(fn => fn({type})); },

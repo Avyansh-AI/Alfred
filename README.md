@@ -342,6 +342,105 @@ The screenshots are `tools/screenshots/capture-born.jpg` (mid-glow), `capture-fl
 (the camera has arrived), `capture-retrieved.jpg` (the next question answered from it) and
 `capture-failed.jpg` (a write that could not happen, said out loud).
 
+## Give it sight
+
+There is a screen button in the ask bar. Press it, pick a screen or a window, and Alfred can
+see what you are looking at:
+
+```
+you:  what am I looking at?
+him:  That is your own editor, sir, with the file list down the left and a terminal at the
+      bottom: the last command you ran failed with a missing-module error on line 12.
+```
+
+Nothing is sent anywhere while you share. A frame is taken **only** when you ask something,
+and only the one frame that question needs.
+
+### The indicator is not subtle on purpose
+
+While a share is live the whole viewport wears a **pulsing red ring**, there is a red pill
+pinned to the top of the window reading **SCREEN LIVE - I CAN SEE YOUR SCREEN / everything
+you ask is about the screen**, the screen button itself lights up red, and the ask bar says
+*"Ask about what is on your screen..."* (the rotating note-title hint stands down for the
+duration, so that line cannot be taken back). When the share ends the ring goes out and the
+badge turns amber and says **SCREEN SHARE ENDED** - he does not go on looking at nothing.
+
+### One frame, taken at the moment you ask
+
+```
+press the screen button        -> getDisplayMedia; the stream is held, no frame is taken
+ask "what am I looking at?"    -> ONE frame, now, off the live track
+                               -> canvas.toDataURL('image/jpeg', 0.85), longest edge capped
+                               -> POST /see {question, image, media_type, asked_at, captured_at}
+                               -> the same GPT-6 Astra brain from config.json, shown the frame
+                               -> the answer comes back through the same voice and the same card
+```
+
+Under every screen answer is **the frame he actually looked at**, with its size, its weight
+and the second it was taken - so you can check his answer against the picture yourself.
+
+### Built so it cannot lie to you
+
+* **The frame is taken inside the ask.** There is no "last frame" variable to fall back on:
+  `grabFrame()` runs in the same function that sends the request, so a stale picture has
+  nowhere to live. Ask twice, and the model is shown two different pictures.
+* **The media type is read back, never assumed.** The viewer asks the canvas for a JPEG and
+  then reads what the canvas *produced* off the data URL (`image/jpeg`, or `image/png` on a
+  browser with no JPEG encoder) and sends that. The server sniffs the first bytes of the
+  image and refuses a disagreement: `400 media_type_mismatch`, naming what was declared and
+  what arrived. One wrong string can never look like a dead feature.
+* **If the share has ended, he says so.** The track's own `onended` (the browser's
+  "Stop sharing" bar) sets the state; a screen question after that sends **nothing** to
+  `/see`, nothing to the canvas, and he says *"The screen share has ended, sir - I am not
+  looking at anything now."* He never answers a screen question from a frame he saw earlier,
+  and a screen question is never quietly answered from the notes instead.
+* **A dead track is admitted.** If the track is gone but no `onended` ever fired, the question
+  is refused out loud rather than answered from a picture that no longer exists.
+* **A frame that cannot be grabbed is admitted.** No frame, no request: *"I could not take a
+  picture of your screen just then, sir. Nothing was sent to be looked at."*
+* **Nothing read lasts.** If the brain fails, the frame is not counted, not stored, and does
+  not enter the history: `/health.sight.frames` stays where it was.
+* **The server holds no pictures at all.** `/health` publishes measurements - count, size,
+  type, the question, the moment - and never a byte of your screen.
+
+### What the model is told
+
+`SEE_STYLE` lives in the persona block at the top of `server.py`, with the rest of the
+character:
+
+> Answer about what is actually in that frame and nothing else. Be specific: names, numbers,
+> labels, headings, what is where, what looks wrong. If the frame is too small, too blurry,
+> too dark or too cropped to judge what he asked about, say so plainly and say what you would
+> need to see it better - never guess at what it might say, and never fall back on what a
+> screen like that usually shows. If the thing he asked about is not in the frame, say that it
+> is not in the frame.
+
+A screen answer is `decision: "screen"`, `on_notes: false`, `nodes: []`: the galaxy holds
+completely still, because unlike a notes answer there is nothing in it to fly to. The footer
+says **from the screen - no notes used**, so the difference is visible at a glance and not
+just in the JSON.
+
+### Try it yourself
+
+```bash
+python3 server.py            # then open http://127.0.0.1:4700
+```
+
+1. Click the **screen button** (the little monitor, right of the mic) and pick a window.
+   The ring and the badge should be impossible to miss.
+2. Ask **"what am I looking at?"** - by typing or by voice, exactly like any other question.
+   The answer is spoken in the same British voice, on the same card, with the frame shown
+   underneath it.
+3. Press the button again (or use the browser's own *Stop sharing* bar) and ask the same
+   question: he tells you the share has ended instead of answering from memory.
+
+`/see` needs the same `config.json` key as `/chat` - it is the same brain. Reading the screen
+is a vision request, so it costs a little more than a notes question.
+
+The screenshots are `tools/screenshots/sight-sharing.jpg` (the ring and the badge while
+sharing), `sight-answer.jpg` (the answer with the frame it came from underneath) and
+`sight-ended.jpg` (the share over, said plainly).
+
 ## Point it at your own notes
 
 By default it indexes `./notes`. Any folder of markdown works:
@@ -392,7 +491,7 @@ which notes the answer really came from.
 | path | what it is |
 | --- | --- |
 | `build.py` | the indexer. Writes `viewer/graph-data.js` as `const GRAPH = {nodes, links}` |
-| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat` and `POST /remember` |
+| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat`, `POST /remember` and `POST /see` |
 | `notes/captures/` | where "remember that ..." writes its notes - real markdown, indexed the moment they are written |
 | `viewer/index.html` | the whole viewer: 3d-force-graph from a CDN, starfield, HUD, side panel, ask bar |
 | `viewer/graph-data.js` | generated - rebuilt by `build.py`, never edit by hand |
@@ -405,11 +504,14 @@ which notes the answer really came from.
 | `tools/verify-voice.mjs` | the voice logic under test: buffers, interrupts, mute, voice choice, status |
 | `tools/verify-provenance.mjs` | the provenance logic under test: fly-to-source, cluster, still, speech length |
 | `tools/verify-capture.mjs` | "grow the brain by voice" under test: `/remember`, the birth, the glow, the links, the loud failures |
+| `tools/verify-sight.mjs` | "give it sight" under test: the held stream, the loud indicator, one frame at the ask, the type read back, the ended share |
+| `tools/browser-sight-check.mjs` | the real thing, in a real browser with a real `getDisplayMedia` share, photographed at every step |
+| `tools/fixtures/screen-frame.jpg` | the 640x360 screen used as a real JPEG in the python checks (11 KB, no Pillow needed) |
 | `tools/browser-capture-check.mjs` | the real thing in a real browser: file on disk, star in the running galaxy, then the follow-up question |
 | `server.py` - "THE PERSONA" | the whole character, in one commented block at the top of the file |
 | `tools/browser-voice-check.mjs` | drives the voice layer in a real browser with a speech spy and a fake mic |
 | `tools/browser-provenance-check.mjs` | the real server, the real notes, three questions, three photographs |
-| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`) |
+| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`, `sight-*.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -467,6 +569,28 @@ npm - which is exactly the situation this project was verified in.
   ask bar is free again for the follow-up question, that a muted tab still files the note, that
   a reload brings back captures the graph file has not caught up with, and - the important one -
   that a failed write is added to nothing, moves nothing, and is **spoken out loud**.
+* `tools/verify-sight.mjs` - "give it sight", headlessly, against a fake stream that hands
+  the page one controlled frame at a time: that the share is held and nothing is grabbed just
+  because it started, that the ring, badge, button and ask bar all say so, that ONE frame is
+  encoded per question and the second question's frame is a different picture, that the media
+  type sent is the one the canvas produced (a canvas that hands back a PNG is sent as a PNG),
+  that a question while sharing always goes to `/see` and never to `/chat`, that an ended
+  share sends nothing at all and says the share has ended, that a track which dies silently
+  and a frame that never arrives are both admitted out loud, and that the character's lines
+  for all of it come from `/health` rather than being hardcoded in the page.
+* `tools/browser-sight-check.mjs` - the whole thing in a real browser with a real
+  `getDisplayMedia` share: a real click on the screen button, a real 1500x844 stream held
+  across the page's own lifetime, a canvas encode timed against the ask (never against the
+  start of the share), the bytes the server forwarded to the model hashed and compared with
+  the bytes the browser encoded, a second frame proved different from the first, and the
+  ended share sending nothing to the model at all. It photographs each step.
+* `tools/verify.py` also checks `/see` end to end against the stub brain: every refusal
+  (`no_frame`, bad base64, a GIF, a truncated JPEG, a frame too small, and the media-type
+  mismatch in both directions) with the brain never being asked about a screen it was not
+  shown, the real 640x360 JPEG going all the way through with the picture arriving at the
+  model byte for byte at `detail: "high"`, no note excerpt travelling with a screen question,
+  `/health` carrying measurements and never a pixel, and a brain that cannot be reached
+  leaving the frame counter and the history exactly where they were.
 * `tools/verify.py` also covers `/remember` end to end against a real throwaway copy of the
   vault: the file's title, its heading and today's date, the next free index, the note it was
   born beside, that `/chat` answers the *next* question from it with no `build.py` run, that a

@@ -7,6 +7,8 @@ server.py - serves the viewer and gives the galaxy a brain.
     to the OpenAI API and returns {"answer": "...", "nodes": [indexes]}
   * POST /remember : "remember that ..." writes a real markdown note into
     notes/captures/, indexes it immediately and reports where to put the new star
+  * POST /see : a question plus ONE frame of the user's screen, captured by the
+    browser at the moment he asked, answered from the picture by the same model
   * keeps a short conversation history server-side so follow-ups work
 
 Python 3 standard library only.
@@ -18,6 +20,8 @@ Python 3 standard library only.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import errno
 import json
 import os
@@ -186,6 +190,52 @@ def capture_failed(reason, filed=False, path=""):
     if filed:
         return CAPTURE_UNINDEXED_LINE.format(file=path, reason=reason)
     return CAPTURE_FAILED_LINE.format(reason=reason)
+
+
+# ---- when he is shown a screen ---------------------------------------------- #
+# The instruction for a screen question. The one thing this must never allow is a
+# guess dressed up as a look, so the rules about small, blurry and missing are as
+# explicit as the rules about being specific.
+SEE_STYLE = (
+    "You are being shown ONE frame of the user's screen, captured at the moment he asked, "
+    "and the question he asked about it. Answer about what is actually in that frame and "
+    "nothing else.\n"
+    "Be specific: names, numbers, labels, headings, what is where, what looks wrong.\n"
+    "If the frame is too small, too blurry, too dark or too cropped to judge what he asked "
+    "about, say so plainly and say what you would need to see it better - never guess at what "
+    "it might say, and never fall back on what a screen like that usually shows.\n"
+    "If the thing he asked about is not in the frame, say that it is not in the frame.\n"
+    "If he asks about his notes while you are looking at his screen, say plainly that his notes "
+    "are not in front of you and that stopping the screen share will bring them back.\n"
+    "One short dry line and then the facts, in the same voice as ever, and no more than three "
+    "sentences."
+)
+SEE_PROMPT = (PERSONA + "\n\nYou are shown one frame of his screen, taken the moment he asks, "
+              "and the question he asked about it.\n" + SEE_STYLE)
+
+# What he says about the share itself. These are served to the page by /health, so the
+# character stays in this block even though the buttons that trigger them live in the viewer.
+SIGHT_STARTED_LINE = ("Watching your screen now, sir. Whatever you ask me next, I will answer "
+                      "from what is actually on it.")
+SIGHT_ENDED_LINE = ("The screen share has ended, sir - I am not looking at anything now. "
+                    "The screen button will start it again.")
+SIGHT_NEVER_LINE = ("I have not been shown your screen yet, sir. The screen button in the ask bar "
+                    "is how you point me at something.")
+SIGHT_LOST_LINE = ("The share is still listed but no live picture is coming through it, sir - "
+                   "start it again and I will look properly.")
+SIGHT_NO_FRAME_LINE = ("Nothing came with that question for me to look at, sir, and I will not "
+                       "describe a screen I cannot see.")
+SIGHT_GRAB_FAILED_LINE = ("I could not take a picture of your screen just then, sir. Nothing was "
+                          "sent to be looked at, and I would rather say so than guess.")
+
+SIGHT_LINES = {
+    "started": SIGHT_STARTED_LINE,
+    "ended": SIGHT_ENDED_LINE,
+    "never": SIGHT_NEVER_LINE,
+    "lost": SIGHT_LOST_LINE,
+    "no_frame": SIGHT_NO_FRAME_LINE,
+    "grab_failed": SIGHT_GRAB_FAILED_LINE,
+}
 
 
 # =========================================================================== #
@@ -577,6 +627,89 @@ def capture_entry(note: dict, notes: list, raw: str, text: str, file_rel: str) -
     }
 
 
+# --------------------------------------------------------------------------- #
+# sight - the frame the viewer sends with POST /see
+#
+# The frame is captured in the browser at the moment a question is asked, encoded
+# as JPEG and sent inline. Nothing here stores a picture: the server keeps the
+# measurements of the last frame (type, size, dimensions, when) and nothing else,
+# so there is no earlier frame for a later question to be answered from.
+# --------------------------------------------------------------------------- #
+SEE_MAX_BODY = 12 * 1024 * 1024        # the whole request body
+SEE_MIN_IMAGE_BYTES = 1024             # smaller than this is not a screen, it is a stub
+SEE_MAX_EDGE = 8192                    # a frame bigger than this is not a screen either
+SEE_MEDIA_TYPES = (
+    ("image/jpeg", "jpeg"),
+    ("image/png", "png"),
+    ("image/webp", "webp"),
+)
+
+
+def sniff_media_type(data: bytes) -> str:
+    """What the bytes actually are, by magic number. Never what the sender claimed."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    return ""
+
+
+def image_dimensions(data: bytes, media_type: str) -> tuple:
+    """(width, height) read out of the file itself, or (None, None)."""
+    try:
+        if media_type == "image/png":
+            return (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"))
+        if media_type == "image/jpeg":
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                if marker == 0xD9:
+                    break
+                seg = int.from_bytes(data[i + 2:i + 4], "big")
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    height = int.from_bytes(data[i + 5:i + 7], "big")
+                    width = int.from_bytes(data[i + 7:i + 9], "big")
+                    return (width, height)
+                i += 2 + seg
+        if media_type == "image/webp":
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                width = 1 + int.from_bytes(data[24:27], "little")
+                height = 1 + int.from_bytes(data[27:30], "little")
+                return (width, height)
+            if chunk == b"VP8 ":
+                width = int.from_bytes(data[26:28], "little") & 0x3FFF
+                height = int.from_bytes(data[28:30], "little") & 0x3FFF
+                return (width, height)
+            if chunk == b"VP8L":
+                bits = int.from_bytes(data[21:25], "little")
+                return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    except (IndexError, ValueError):
+        pass
+    return (None, None)
+
+
+def strip_data_url(text: str) -> tuple:
+    """Split 'data:image/jpeg;base64,....' into (declared_type, base64_payload)."""
+    text = (text or "").strip()
+    if text[:5].lower() != "data:":
+        return "", text
+    head, _, tail = text.partition(",")
+    return head[5:].split(";")[0].strip().lower(), tail.strip()
+
+
 def order_notes_like_graph(notes: list, graph_path: str) -> tuple:
     """Notes in the order the galaxy is drawn in, plus the ones the graph lacks.
 
@@ -736,6 +869,19 @@ def build_messages(question: str, notes: list, picked: list, history: list) -> l
     return [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user}]
 
 
+def build_see_messages(question: str, image: bytes, media_type: str, history: list) -> list:
+    """The question plus the frame, in the shape the vision endpoint expects."""
+    data_url = "data:%s;base64,%s" % (media_type, base64.b64encode(image).decode("ascii"))
+    user = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+        ],
+    }
+    return [{"role": "system", "content": SEE_PROMPT}] + history + [user]
+
+
 def build_chat_messages(question: str, history: list) -> list:
     """Small talk: same history, no note excerpts, and a prompt that says so."""
     user = ("The user said: %s\n\n"
@@ -857,6 +1003,8 @@ class State:
         self.base_url = args.openai_base_url or os.environ.get("ALFRED_OPENAI_BASE_URL") or DEFAULT_BASE_URL
         self.history = []                     # [{"role": .., "content": ..}, ..]
         self.captures = []                    # notes the graph file does not know yet
+        self.frames = 0                       # frames looked at through POST /see
+        self.last_frame = None                # measurements of the last one, never the pixels
         self.last_on_notes = False            # has this conversation been about the notes yet?
         self.lock = threading.Lock()
         self.started = time.time()
@@ -912,6 +1060,18 @@ class State:
             # empties this list, because the graph file then knows them itself.
             "captures": captures,
             "graph_file": "behind" if captures else "current",
+            # Sight: the character's own lines for the share (so the page carries none of
+            # the personality), how many frames have been looked at, and the measurements of
+            # the last one. Deliberately not the picture itself - there is no stored frame in
+            # this server for a later question to be answered from.
+            "sight": {
+                "frames": self.frames,
+                "last_frame": dict(self.last_frame) if self.last_frame else None,
+                "lines": dict(SIGHT_LINES),
+                "media_types": [t for t, _ in SEE_MEDIA_TYPES],
+                "max_edge": SEE_MAX_EDGE,
+                "min_bytes": SEE_MIN_IMAGE_BYTES,
+            },
             "uptime_s": round(time.time() - self.started, 1),
             "root": self.root,
         }
@@ -1036,6 +1196,13 @@ class Handler(BaseHTTPRequestHandler):
                                "GET /remember is not supported - POST a JSON body instead.",
                                'Example: curl -X POST -d \'{"text":"remember that ..."}\' '
                                'http://127.0.0.1:%d/remember' % self.server.server_address[1])
+        if path == "/see":
+            return self._error(HTTPStatus.METHOD_NOT_ALLOWED,
+                               "GET /see is not supported - POST a JSON body with the question "
+                               "and the frame.",
+                               'The frame is taken in the browser (viewer/index.html, submitScreen) '
+                               'and posted as {"question": "...", "image": "data:image/jpeg;base64,..."} '
+                               'to http://127.0.0.1:%d/see' % self.server.server_address[1])
         return self._static(path, head_only)
 
     def do_POST(self):
@@ -1044,8 +1211,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._chat()
         if path == "/remember":
             return self._remember()
+        if path == "/see":
+            return self._see()
         self._error(HTTPStatus.NOT_FOUND, "No such endpoint: %s" % path,
-                    "Only POST /chat and POST /remember exist on this server.")
+                    "Only POST /chat, POST /remember and POST /see exist on this server.")
 
     def do_OPTIONS(self):
         self._send(HTTPStatus.NO_CONTENT, b"", extra={"Allow": "GET, HEAD, POST, OPTIONS"})
@@ -1155,6 +1324,181 @@ class Handler(BaseHTTPRequestHandler):
             "link_labels": entry["link_labels"], "notes": entry["notes"],
             "graph_file": "behind",       # the new note is not in graph-data.js yet
             "model": state.model, "turns": len(state.history) // 2,
+        })
+
+    # -- sight -------------------------------------------------------------- #
+    def _see(self):
+        """POST /see - a question plus ONE frame of the screen, captured at ask time.
+
+        The client is responsible for taking the frame when the question is asked; this
+        endpoint never holds a picture from one request to the next, so a question can
+        only ever be answered from the frame that arrived with it.
+        """
+        state = self.state
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > SEE_MAX_BODY:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                               "That frame is too large to send (%.1f MB)." % (length / 1048576.0),
+                               "Take the frame at a smaller size: the viewer caps the longest "
+                               "edge at %d pixels." % SEE_MAX_EDGE)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            return self._error(HTTPStatus.BAD_REQUEST, "Request body must be JSON.",
+                               'Send {"question": "...", "image": "data:image/jpeg;base64,..."}.')
+        if not isinstance(payload, dict):
+            return self._error(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object.")
+
+        question = (payload.get("question") or payload.get("q") or "").strip()
+        if not question:
+            return self._error(HTTPStatus.BAD_REQUEST, "No question was provided.",
+                               'Send {"question": "...", "image": "data:image/jpeg;base64,..."}.')
+        question = question[:1000]
+
+        # The frame. Accepted either as a self-describing data URL or as base64 plus a
+        # declared media_type; whichever way, the claim is checked against the bytes.
+        declared = (payload.get("media_type") or "").strip().lower()
+        blob = payload.get("image") or payload.get("frame") or payload.get("image_base64") or ""
+        if not isinstance(blob, str) or not blob.strip():
+            return self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "code": "no_frame", "answer": SIGHT_NO_FRAME_LINE,
+                "error": "No frame was sent with the question.",
+                "hint": "The frame is captured in the browser when you ask; a request without "
+                        "one is a question about a screen that was never shown.",
+                "decision": "screen", "on_notes": False, "nodes": [], "sources": [],
+                "model": state.model, "turns": len(state.history) // 2,
+            })
+        prefix_type, b64 = strip_data_url(blob)
+        if prefix_type:
+            declared = prefix_type
+        if len(b64) > SEE_MAX_BODY:
+            return self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                               "That frame is too large to send (%.1f MB decoded)."
+                               % (len(b64) * 0.75 / 1048576.0))
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            return self._error(HTTPStatus.BAD_REQUEST,
+                               "That frame is not valid base64 - it arrived damaged.",
+                               "The viewer encodes the frame with canvas.toDataURL('image/jpeg') "
+                               "and posts the payload unchanged; a corrupted body means it was "
+                               "altered in transit.")
+
+        actual = sniff_media_type(data)
+        # THE trap this feature is built to survive: an encoder and a media type that do
+        # not agree. Say exactly what was sent and exactly what arrived.
+        if declared and actual and declared != actual:
+            return self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "code": "media_type_mismatch",
+                "error": "The frame was declared %s but the bytes are %s." % (declared, actual),
+                "answer": SIGHT_NO_FRAME_LINE,
+                "hint": "Send the media type of what was actually encoded. The viewer reads it "
+                        "back off the data URL (canvas.toDataURL returns what the browser really "
+                        "produced) instead of assuming.",
+                "declared": declared, "actual": actual, "bytes": len(data),
+                "decision": "screen", "on_notes": False, "nodes": [], "sources": [],
+                "model": state.model, "turns": len(state.history) // 2,
+            })
+        if actual not in [t for t, _ in SEE_MEDIA_TYPES]:
+            return self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {
+                "ok": False, "code": "unsupported_image",
+                "error": "That frame is %s (%s), which the model cannot be shown."
+                          % (actual or "not an image at all",
+                             " ".join("%02x" % b for b in data[:4])),
+                "answer": SIGHT_NO_FRAME_LINE,
+                "hint": "Send JPEG, PNG or WebP. The viewer asks the canvas for image/jpeg.",
+                "declared": declared, "actual": actual, "bytes": len(data),
+                "decision": "screen", "on_notes": False, "nodes": [], "sources": [],
+                "model": state.model, "turns": len(state.history) // 2,
+            })
+        if len(data) < SEE_MIN_IMAGE_BYTES:
+            return self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "code": "frame_too_small",
+                "error": "That frame is %d bytes, too small to be a screen." % len(data),
+                "answer": SIGHT_NO_FRAME_LINE,
+                "hint": "A real capture of a screen is far bigger than this. An empty or "
+                        "blank canvas usually means the share ended before the frame was taken.",
+                "bytes": len(data), "decision": "screen", "on_notes": False,
+                "nodes": [], "sources": [], "model": state.model,
+                "turns": len(state.history) // 2,
+            })
+        if actual == "image/jpeg" and not data.endswith(b"\xff\xd9"):
+            return self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "code": "frame_truncated",
+                "error": "That JPEG is truncated - it has no end-of-image marker.",
+                "answer": SIGHT_NO_FRAME_LINE,
+                "hint": "The frame was cut short in transit. Nothing was shown to the model, "
+                        "because half a screen is worse than none.",
+                "bytes": len(data), "decision": "screen", "on_notes": False,
+                "nodes": [], "sources": [], "model": state.model,
+                "turns": len(state.history) // 2,
+            })
+        width, height = image_dimensions(data, actual)
+        if width and height and (width > SEE_MAX_EDGE or height > SEE_MAX_EDGE):
+            return self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "code": "frame_too_large",
+                "error": "That frame is %dx%d, larger than this server accepts." % (width, height),
+                "answer": SIGHT_NO_FRAME_LINE,
+                "hint": "The viewer caps the longest edge at %d pixels before encoding."
+                        % SEE_MAX_EDGE,
+                "width": width, "height": height, "bytes": len(data),
+                "decision": "screen", "on_notes": False, "nodes": [], "sources": [],
+                "model": state.model, "turns": len(state.history) // 2,
+            })
+
+        frame = {
+            "media_type": actual,
+            "bytes": len(data),
+            "width": width,
+            "height": height,
+            "question": question,
+            "asked_at": payload.get("asked_at"),
+            "captured_at": payload.get("captured_at"),
+            "at": time.time(),
+        }
+        with state.lock:
+            history = list(state.history)
+        messages = build_see_messages(question, data, actual, history)
+
+        state.questions += 1
+        try:
+            answer = call_openai(state.cfg, messages, state.base_url)
+        except BrainError as err:
+            # Nothing is recorded as looked at: no frame was read, so the galaxy, the
+            # frame counter and the history all stay exactly as they were.
+            return self._json(err.status, {
+                "ok": False, "error": err.message, "code": err.code, "hint": err.hint,
+                "answer": err.message, "decision": "screen", "on_notes": False,
+                "nodes": [], "sources": [], "read": [], "frame": frame,
+                "model": state.model, "turns": len(history) // 2,
+            })
+        except Exception as err:                                  # never crash the server
+            return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {
+                "ok": False, "error": "Unexpected brain failure: %s" % err,
+                "code": "internal_error", "decision": "screen", "on_notes": False,
+                "nodes": [], "sources": [], "read": [], "frame": frame,
+            })
+
+        with state.lock:
+            state.history.append({"role": "user", "content": question})
+            state.history.append({"role": "assistant", "content": answer})
+            state.history = state.history[-(HISTORY_TURNS * 2):]
+            state.frames += 1
+            state.last_frame = frame         # measurements only, never the picture
+
+        return self._json(HTTPStatus.OK, {
+            "ok": True,
+            "answer": answer,
+            "decision": "screen",            # never "notes": a screen answer lights nothing
+            "on_notes": False,
+            "nodes": [],                     # so the galaxy holds still, as it must
+            "sources": [],
+            "read": [],
+            "frame": frame,
+            "frames_looked_at": state.frames,
+            "model": state.model,
+            "turns": len(state.history) // 2,
         })
 
     # -- the brain --------------------------------------------------------- #
@@ -1286,7 +1630,7 @@ def main(argv=None):
     print("  api key     : %s  (%s)" % (ks, state.config_path))
     if ks != "set":
         print("                -> /chat answers with a clean 'paste your key' error until this is set")
-    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember")
+    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember  POST /see")
     print("  ---------------------------------------------------------------")
     print("  ctrl-c to stop")
     print("")
