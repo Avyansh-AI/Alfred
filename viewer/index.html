@@ -1679,8 +1679,12 @@ async function boot3d(){
                        paint: paintBrain,
                        submit: submitBrain
                      },
-                     // focus sessions: the card, the button, the routing
-                     focus: {
+                     // focus sessions: the card, the button, the routing.
+                     // NB: `focus` above is the camera flight and stays a function - this
+                     // block used to be called `focus` too, and a later key in an object
+                     // literal silently wins, so the whole real-browser suite lost the
+                     // camera hook without one test going red in here.
+                     focusSession: {
                        POLL_MS: FOCUS_POLL_MS, DEFAULT_MINUTES: FOCUS_DEFAULT_MINUTES,
                        state: () => focusState,
                        spokenSeq: () => focusSpoken,

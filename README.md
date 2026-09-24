@@ -736,6 +736,16 @@ question and screenshots the result. It found three things that headless logic t
 * **The focused note hid behind the side panel.** The camera now pans so the note you flew to sits
   in the middle of the *visible* area - measured at 605px against a visible centre of 605px.
 
+And a fourth, from adding focus sessions - a reminder that **a test hook is an API too**. The
+session hooks went in as `window.__alfred.focus`, which is also the name of the camera flight
+every browser check calls: a second key with the same name in one object literal silently wins,
+so `__alfred.focus(target)` became `undefined` and the browser suite died with
+`g.focus is not a function` - while every headless suite stayed green, because none of them
+called it. The session hooks are `__alfred.focusSession` now, and `tools/verify.mjs` refuses to
+let it happen again: it finds every top-level key of the hooks object in the page's source and
+fails on a duplicate, and it pins `__alfred.focus` to a function and `__alfred.focusSession` to
+the sessions. Put the name back and four checks go red, which is how you know the guard works.
+
 One thing the provenance work corrected rather than caught: the README used to say an answer
 "lights those notes up in the galaxy". It never did - the response's node list was only ever
 rendered as chips under the answer. It lights them now, and only after the decision above says
@@ -787,6 +797,8 @@ mock never does.
 | `tools/verify-brain.mjs` | "change its brain by voice" under test: the chip's label, command-vs-question routing, the refusal, a swap during a live share |
 | `tools/verify-focus.mjs` | focus sessions in the page under test: the card, the clock that only ever comes from the server, the tint on drift, the spoken callout, the report card, and an identity sweep across every on-screen surface |
 | `tools/focus-timings.py` | prints the focus timings from a running server - the knobs, the band, the field numbers and a reading of them - before anybody touches `GRACE_MS` |
+| `tools/verify-preflight.py` | proves preflight's focus check can fail: four stub servers, three wrong on purpose, each failure asserted with its reason |
+| `tools/fixtures/fake-focus-server.py` | those stubs: a focus server over HTTP that is wrong in one specific way (a frozen clock, a reader never asked again, a state carrying a name) |
 | `tools/browser-brain-check.mjs` | the swap in a real browser against the real server: the OpenRouter route is the only live one, so the swap has to be real |
 | `tools/fixtures/screen-frame.jpg` | the 640x360 screen used as a real JPEG in the python checks (11 KB, no Pillow needed) |
 | `tools/browser-capture-check.mjs` | the real thing in a real browser: file on disk, star in the running galaxy, then the follow-up question |
@@ -874,6 +886,11 @@ npm - which is exactly the situation this project was verified in.
   `/focus` while ten questions about focus still go to `/chat`, that the FOCUS button starts and
   ends a session, that a refusal is shown rather than dressed up, and that the report card and the
   ledger totals land on screen - with an identity sweep over every element the page can show.
+* `tools/verify-preflight.py` - that preflight's focus check really checks. Four servers are
+  started on free ports and preflight is run against each as a subprocess: a good one (the
+  check must pass), one whose session never ticks, one that never asks the reader again, and
+  one whose state carries a host in a string (each must fail, with the right words). It also
+  proves preflight will not touch a session that is already running.
 * `tools/verify.py` also runs focus sessions end to end: the parser ("twenty five minutes" is
   1500 seconds, "half an hour" is 1800), the grace and the tiers on a synthetic clock (a 300ms
   flick is not a drift; tier 2 arrives when the excursion really is 20s old, not when 20s of ticks
@@ -966,9 +983,11 @@ the chain, in the order it has to work
 ✔ 2. graph data loads, and has nodes                          12 nodes, 22 links, every id == its index
 ✔ 6. /remember writes a real file, searchable at once         wrote captures/the-preflight-probe-ydgfgh-proves.md and /chat answered from it immediately
 ✔ 9. config.json is not reachable from the browser            13 traversal attempts refused by a server that answered, and the key never appeared in 25 response(s)
+✗ 13. a brain swap is runtime-only, and a near-miss is refused  ...
+✔ 14. a focus session ticks on the server, and the state carr...  a real session started, ticked, and closed with no browser attached
 ```
 
-Thirteen links, in the order they have to work:
+Fourteen links, in the order they have to work:
 
 1. the server is up and serving the viewer; 2. the graph loads and has nodes; 3. `/chat`
 answers a real question built from a real note title, with a `nodes` array whose indexes the
@@ -991,6 +1010,49 @@ version that cannot exist, puts `config.json`'s brain back, and compares the fil
 byte. Unlike the others, this one changes the running system on purpose, so `--no-swap` skips
 it. That is the rule for this file - **one check per scar**.
 
+Check 14 is the newest, and it exists because the failure it looks for is invisible in a
+different way from the rest. A focus session lives on a thread inside a server that runs for
+weeks; the tempting way to write it - reading whatever an app-switch notification last
+delivered - stops delivering, reports the first app forever, and carries on counting.
+**Nothing errors. Nothing logs. The clock just stops meaning anything.** So the check takes a
+real session from a real request, watches it tick with no browser open, insists the front app
+was asked afresh every tick, and rejects any state carrying a string that looks like a name
+(a bundle id and a host both carry a dot, a URL carries a slash, and every legitimate value
+there is a boolean, a counter or a short enum word). It ends the session it started, and it
+refuses to touch a session that is already yours: run `preflight.py` mid-session and it says
+so and leaves it alone.
+
+Two more scars, from running preflight against a server that had been up all day - both of
+them in check 6, and both fixed:
+
+* **it cried wolf on the second run.** Check 6 asked *"what is the preflight probe canary?"*,
+  a question that matches every probe note ever filed into that server's memory - and a
+  long-lived server keeps them all. Two runs in a row and the newest note was competing with
+  its own ancestors for the top of the list, so the check failed with *"the write and the index
+  disagree"* when they agreed perfectly. It now files a note with **two** random words: one
+  names the note in the question, the other is the canary and never appears in the question, so
+  the question can only be answered by a brain that really holds that file. Three runs in a row
+  after that, all green.
+* **a red check left rubbish in the vault.** The tidy-up that removes the probe note sat after
+  the early returns, so a failing check 6 left `captures/the-preflight-probe-*.md` behind - for
+  you to find, and for the next run to trip over. The tidy-up is in a `finally` now, and the
+  failure path proves it: a server deliberately built to file a note and forget it fails the
+  check (HTTP 500, `capture_failed`, the file named) and leaves the folder exactly as it was.
+
+A check that cries wolf, or that leaves its own mess behind, teaches you to ignore it - which
+is worse than not having it. That is worth a test of its own, so:
+
+```bash
+python3 tools/verify-preflight.py     # proves that check can fail, not just pass
+```
+
+Four servers are started for that: one that behaves, and three that are wrong on purpose
+(`tools/fixtures/fake-focus-server.py`) - a clock that never moves, a reader that is never
+asked again, and a state with a host in it. Each one has to be caught, **with the right reason
+printed**, because a check nobody has ever seen fail is a check that might be checking
+nothing. Gut the check and that suite goes red; the four modes and the passing one are 15
+checks.
+
 Three marks, and one line at the end:
 
 * `✔` that link answered for itself.
@@ -999,12 +1061,12 @@ Three marks, and one line at the end:
   network - or a real problem that is not fatal. The reason is printed under it.
 
 ```
-preflight: 9 pass, 0 fail, 4 warn  (13 checks in 0.0s against http://127.0.0.1:4700)
+preflight: 10 pass, 0 fail, 4 warn  (14 checks in 2.7s against http://127.0.0.1:4700)
 ```
 
 `--url http://127.0.0.1:4711` points it somewhere else, `--json` prints one machine-readable
 object for scripts, `--keep-probe-note` leaves the `/remember` probe on disk to look at,
-`--no-swap` skips the brain-swap check. It
+`--no-swap` skips the brain-swap check, `--no-focus` skips the focus-session probe. It
 exits 0 unless something is actually red, so it can sit in front of a deploy or a "done".
 
 A run spends a little of your quota on purpose - one question through `/chat`, one one-token

@@ -493,6 +493,51 @@ catch (err) { bad('placeholder rotation tick threw: ' + err.message); }
 const painted = canvases.filter(c => c._calls && c._calls.length);
 check(painted.length >= 2, 'glow + star textures were painted onto real canvases (' + painted.length + ')');
 
+/* ------------------------------------- the test hooks themselves, and their names
+   A second key with the same name in one object literal silently wins, and it cost the whole
+   real-browser suite its camera hook when the focus-session hooks were added as `focus`. So:
+   no hook may be defined twice, and the two `focus`-ish names are pinned to what they are. */
+function topLevelKeys(src, startIndex){
+  const keys = [];
+  let depth = 0, sig = '';
+  for (let i = startIndex; i < src.length; i++){
+    const ch = src[i];
+    if (ch === '/' && src[i+1] === '/'){ while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (ch === '/' && src[i+1] === '*'){ i = src.indexOf('*/', i) + 1; continue; }
+    if (ch === '"' || ch === "'" || ch === '`'){
+      const q = ch; i++;
+      while (i < src.length && src[i] !== q){ if (src[i] === '\\') i++; i++; }
+      sig = q; continue;
+    }
+    if (ch === '{' || ch === '(' || ch === '['){ depth++; sig = ch; continue; }
+    if (ch === '}' || ch === ')' || ch === ']'){
+      depth--;
+      if (depth === 0 && ch === '}') return keys;
+      sig = ch; continue;
+    }
+    if (depth === 1 && (sig === '{' || sig === ',')){
+      const m = /^([A-Za-z_$][\w$]*)\s*:/.exec(src.slice(i));
+      if (m) keys.push(m[1]);
+    }
+    if (!/\s/.test(ch)) sig = ch;
+  }
+  return keys;
+}
+const hookAt = HTML.indexOf('window.__alfred = {');
+const hookKeys = hookAt < 0 ? [] : topLevelKeys(HTML, HTML.indexOf('{', hookAt));
+const dupeKeys = [...new Set(hookKeys.filter((k, i) => hookKeys.indexOf(k) !== i))];
+check(hookKeys.length > 10, 'the test hooks are found in the page (' + hookKeys.length + ' keys)');
+check(hookKeys.indexOf('focus') >= 0 && hookKeys.indexOf('focusSession') >= 0,
+      'both the camera hook and the focus-session hook are declared');
+check(dupeKeys.length === 0, 'no hook is declared twice (the second one would silently win): ' +
+      (dupeKeys.join(', ') || 'none'));
+check(typeof alfred.focus === 'function',
+      '__alfred.focus is still the camera flight the browser checks call');
+check(typeof alfred.focusSession === 'object' && typeof alfred.focusSession.card === 'function',
+      '__alfred.focusSession carries the focus sessions (card, join, poll, button)');
+check(typeof alfred.voice === 'object' && typeof alfred.brain === 'object' &&
+      typeof alfred.sight === 'object', 'and the other hook groups kept their names too');
+
 /* ------------------------------------------------------------------- report */
 console.log('\nviewer/index.html - headless verification (node ' + process.version + ')');
 console.log(notes.join('\n'));

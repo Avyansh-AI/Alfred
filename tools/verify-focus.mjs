@@ -103,34 +103,34 @@ const shot = () => new Promise(r => setImmediate(r));
 group('the card: a view of the server\'s session, and nothing else');
 {
   const p = await page({states: [IDLE]});
-  const before = p.app.focus.card();
+  const before = p.app.focusSession.card();
   check(before.hidden === true, 'nothing on screen when there is no session');
-  check(p.app.focus.button_face().pressed === 'false', 'and the FOCUS button says so');
+  check(p.app.focusSession.button_face().pressed === 'false', 'and the FOCUS button says so');
 
   const p2 = await page({states: [RUNNING({remaining_s: 1560, on_s: 240, planned_s: 1800})]});
-  await p2.app.focus.join(); await shot();
-  const card = p2.app.focus.card();
+  await p2.app.focusSession.join(); await shot();
+  const card = p2.app.focusSession.card();
   check(card.hidden === false, 'a session on the server puts the card on screen');
   check(card.clock === '26:00', 'the countdown comes from the server\'s seconds: ' + card.clock);
   check(card.fill !== '' && parseFloat(card.fill) > 12 && parseFloat(card.fill) < 14,
         'the bar is filled from the server\'s numbers (' + card.fill + ', 240s into 1800s)');
   check(/on target/.test(card.state), 'and the state line reads on target: ' + JSON.stringify(card.state));
-  check(p2.app.focus.button_face().pressed === 'true', 'the button is pressed while a session runs');
+  check(p2.app.focusSession.button_face().pressed === 'true', 'the button is pressed while a session runs');
   check(/30s/.test(card.meta), 'the meta line carries the counters: ' + card.meta);
 }
 {
   // the countdown is the server's clock: the same state twice does not tick locally
   const p = await page({states: [RUNNING({remaining_s: 1799})]});
-  await p.app.focus.join(); await shot();
-  const a = p.app.focus.card().clock;
+  await p.app.focusSession.join(); await shot();
+  const a = p.app.focusSession.card().clock;
   await p.clock.advance(5000); await shot();
-  const b = p.app.focus.card().clock;
+  const b = p.app.focusSession.card().clock;
   check(a === b, 'the card does not invent a countdown of its own: ' + a + ' after five seconds');
 }
 {
   const p = await page({states: [DRIFT()]});
-  await p.app.focus.join(); await shot();
-  const card = p.app.focus.card();
+  await p.app.focusSession.join(); await shot();
+  const card = p.app.focusSession.card();
   check(card.className.indexOf('drift') >= 0, 'drifting tints the card: ' + card.className);
   check(card.tier === 'tier 1', 'and says which tier it is: ' + card.tier);
   check(/another tab/.test(card.state), 'the state line names the KIND, not the site: ' + card.state);
@@ -138,15 +138,15 @@ group('the card: a view of the server\'s session, and nothing else');
 }
 {
   const p = await page({states: [DRIFT({tier: 3, reason: 'app', off_open_s: 77, drifts: 3})]});
-  await p.app.focus.join(); await shot();
-  const card = p.app.focus.card();
+  await p.app.focusSession.join(); await shot();
+  const card = p.app.focusSession.card();
   check(/t3/.test(card.className), 'tier 3 is marked as its own thing: ' + card.className);
   check(/another app/.test(card.state), 'and an app drift reads "another app": ' + card.state);
 }
 {
   const p = await page({states: [RUNNING({reader: 'blind', reader_why: 'failed', on_s: 0})]});
-  await p.app.focus.join(); await shot();
-  const card = p.app.focus.card();
+  await p.app.focusSession.join(); await shot();
+  const card = p.app.focusSession.card();
   check(card.className.indexOf('blind') >= 0, 'a blind reader marks the card');
   check(/cannot see/.test(card.state), 'and says so plainly: ' + card.state);
   check(/nothing is being counted/.test(card.meta),
@@ -154,9 +154,9 @@ group('the card: a view of the server\'s session, and nothing else');
 }
 {
   const p = await page({states: [RUNNING({reason: 'home', on_target: true})]});
-  await p.app.focus.join(); await shot();
-  check(/home base/.test(p.app.focus.card().state),
-        'his own tab reads as home base, not as a drift: ' + p.app.focus.card().state);
+  await p.app.focusSession.join(); await shot();
+  check(/home base/.test(p.app.focusSession.card().state),
+        'his own tab reads as home base, not as a drift: ' + p.app.focusSession.card().state);
 }
 
 /* =========================================================================
@@ -165,7 +165,7 @@ group('the card: a view of the server\'s session, and nothing else');
 group('routing: commands about the session go to /focus, questions stay questions');
 {
   const p = await page({states: [RUNNING()]});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   const COMMANDS = ['thirty minutes on this', 'focus for 30 minutes', 'pause', 'resume',
                     'end the session', "I'm done", "it's okay, I'm doing research",
                     'give me fifteen seconds', 'call me out every thirty seconds',
@@ -176,10 +176,10 @@ group('routing: commands about the session go to /focus, questions stay question
                      'switch to astra', 'remember that the finish window is 900 milliseconds',
                      'what is on my screen?', 'hello there', 'stop'];
   for (const text of COMMANDS){
-    check(p.app.focus.isCommand(text, 'running') === true, 'a command: ' + JSON.stringify(text));
+    check(p.app.focusSession.isCommand(text, 'running') === true, 'a command: ' + JSON.stringify(text));
   }
   for (const text of QUESTIONS){
-    check(p.app.focus.isCommand(text, 'running') === false, 'a question: ' + JSON.stringify(text));
+    check(p.app.focusSession.isCommand(text, 'running') === false, 'a question: ' + JSON.stringify(text));
   }
 }
 {
@@ -187,7 +187,7 @@ group('routing: commands about the session go to /focus, questions stay question
   const p = await page({states: [RUNNING()],
     post: (body) => ({ok: true, code: 'focus_paused', answer: 'Paused, sir. The clock stops with you.',
                       focus: RUNNING({phase: 'paused'})})});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   p.calls.length = 0;
   p.app.voice.submitQuestion('pause');
   await p.flush(3, 40);
@@ -202,7 +202,7 @@ group('routing: commands about the session go to /focus, questions stay question
 {
   // a question that merely mentions focus still goes to the notes
   const p = await page({states: [RUNNING()]});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   p.calls.length = 0;
   p.app.voice.submitQuestion('can you focus on the budget note?');
   await p.flush(3, 40);
@@ -213,7 +213,7 @@ group('routing: commands about the session go to /focus, questions stay question
 {
   // a focus command outranks a live screen share: the session is still drivable by voice
   const p = await page({states: [RUNNING()], screen: {frames: [tinyFrame(1)]}});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   await p.app.sight.start(); await shot();
   p.calls.length = 0;
   p.app.voice.submitQuestion('end the session');
@@ -237,25 +237,25 @@ group('the callouts: spoken once, in order, and never twice');
     DRIFT({speak: [VOICE(2, 'Sir. The clock is running and you are not on it.', 2)], tier: 2, since: 2})
   ]});
   p.pin(DRIFT({speak: [VOICE(1, 'That is not where the work is, sir.')], since: 1}));
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   check(words(p.app) === 'That is not where the work is, sir.',
         'the first callout is spoken: ' + JSON.stringify(words(p.app)));
-  check(p.app.focus.spokenSeq() === 1,
-        'and remembered by seq (' + p.app.focus.spokenSeq() + '), so the next poll asks for more');
+  check(p.app.focusSession.spokenSeq() === 1,
+        'and remembered by seq (' + p.app.focusSession.spokenSeq() + '), so the next poll asks for more');
   // a second poll with nothing new in it: the same line must not be said again
   p.pin(DRIFT({speak: [], since: 1}));
-  await p.app.focus.poll(); await shot();
+  await p.app.focusSession.poll(); await shot();
   check(words(p.app) === 'That is not where the work is, sir.',
         'the same callout is not repeated when the server sends nothing new');
   p.pin(DRIFT({speak: [VOICE(2, 'Sir. The clock is running and you are not on it.', 2)], tier: 2, since: 2}));
-  await p.app.focus.poll(); await shot();
+  await p.app.focusSession.poll(); await shot();
   check(words(p.app) === 'Sir. The clock is running and you are not on it.',
         'the next tier arrives when the server sends it: ' + JSON.stringify(words(p.app)));
-  check(p.app.focus.spokenSeq() === 2, 'and the seq moves on with it');
+  check(p.app.focusSession.spokenSeq() === 2, 'and the seq moves on with it');
   // the poll is on a timer, not on a hand-crank: one second, by the page's own constant
   check(p.clock.pending().some(ms => ms > 0 && ms <= 1000),
         'the page polls the session on a timer of its own: ' + JSON.stringify(p.clock.pending().slice(0, 3)));
-  check(p.app.focus.POLL_MS === 1000, 'and that timer is one second: ' + p.app.focus.POLL_MS);
+  check(p.app.focusSession.POLL_MS === 1000, 'and that timer is one second: ' + p.app.focusSession.POLL_MS);
   const before = p.calls.filter(c => c.url.indexOf('/focus') >= 0).length;
   await p.flush(4, 400);
   check(p.calls.filter(c => c.url.indexOf('/focus') >= 0).length > before,
@@ -264,18 +264,18 @@ group('the callouts: spoken once, in order, and never twice');
 {
   // a page that opens mid-drift does not nag about a callout it was not there for
   const p = await page({states: [DRIFT({speak: [], since: 9})]});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   check(!p.app.voice.lastSpoken(), 'joining a session says nothing about old callouts');
-  check(p.app.focus.spokenSeq() === 9, 'it marks them as already dealt with: ' + p.app.focus.spokenSeq());
+  check(p.app.focusSession.spokenSeq() === 9, 'it marks them as already dealt with: ' + p.app.focusSession.spokenSeq());
 }
 {
   // a muted tab: the card still shows the drift, and the speech engine is never called
   const p = await page({states: [DRIFT({speak: [VOICE(1, 'That is not where the work is, sir.')], since: 1})],
                        search: '?mute=1'});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   check(!p.app.voice.lastSpoken(), 'a ?mute=1 tab says nothing');
-  check(p.app.focus.card().className.indexOf('drift') >= 0, 'the drift is still visible in a muted tab');
-  check(p.app.focus.spokenSeq() === 1, 'and the callout is still marked as dealt with');
+  check(p.app.focusSession.card().className.indexOf('drift') >= 0, 'the drift is still visible in a muted tab');
+  check(p.app.focusSession.spokenSeq() === 1, 'and the callout is still marked as dealt with');
 }
 
 /* =========================================================================
@@ -295,18 +295,18 @@ group('the report card: spoken, on-screen, and honest about the ledger');
                    'on the tally, 1 refund. That is 3 clean in a row.'}
   };
   const p = await page({states: [report]});
-  await p.app.focus.join(); await shot();
-  check(p.app.focus.card().phase === 'session closed', 'the card says the session is closed');
-  check(p.app.focus.card().clock === '30:00',
+  await p.app.focusSession.join(); await shot();
+  check(p.app.focusSession.card().phase === 'session closed', 'the card says the session is closed');
+  check(p.app.focusSession.card().clock === '30:00',
         'a closed card shows the time the session took, not a countdown still running: ' +
-        p.app.focus.card().clock);
-  check(/93% clean/.test(p.app.focus.card().state), 'and reads the clean percentage');
+        p.app.focusSession.card().clock);
+  check(/93% clean/.test(p.app.focusSession.card().state), 'and reads the clean percentage');
   const shown = p.elements.get('answer-text').textContent;
   check(/28 of 30 minutes on target/.test(shown), 'the report card is on the answer card: ' + shown);
   check(p.elements.get('a-foot').textContent.indexOf('streak 3') >= 0,
         'the footer carries the streak: ' + p.elements.get('a-foot').textContent);
   await p.clock.advance(20000); await shot();
-  check(p.app.focus.card().hidden === true, 'and the card puts itself away afterwards');
+  check(p.app.focusSession.card().hidden === true, 'and the card puts itself away afterwards');
 
   const short = Object.assign({}, report, {elapsed_s: 12, on_s: 12, clean_pct: 100,
     report: {on: 0.2, planned: 30, pct: 100, drifts: 0, refunds: 0, streak: 0, clean: true,
@@ -314,7 +314,7 @@ group('the report card: spoken, on-screen, and honest about the ledger');
              text: 'That was 12 seconds, sir - a poke, not a session. Nothing has gone in the ' +
                    'ledger, and no streak was risked.'}});
   const q = await page({states: [short]});
-  await q.app.focus.join(); await shot();
+  await q.app.focusSession.join(); await shot();
   check(/not in the ledger/.test(q.elements.get('a-foot').textContent),
         'a session too short to count says so on the footer: ' +
         q.elements.get('a-foot').textContent);
@@ -323,26 +323,26 @@ group('the report card: spoken, on-screen, and honest about the ledger');
   // and then a new session starts. The linger must not reach in and put the new card away -
   // the bug this pins down was a card that froze mid-session, eight seconds in.
   const r = await page({states: [report]});                  // the page opens on the old report
-  await r.app.focus.join(); await shot();
-  check(/session closed/.test(r.app.focus.card().phase),
-        'a page opened on a finished session shows it: ' + r.app.focus.card().phase);
-  check(r.app.focus.card().hidden === false, 'and the card is up for it');
+  await r.app.focusSession.join(); await shot();
+  check(/session closed/.test(r.app.focusSession.card().phase),
+        'a page opened on a finished session shows it: ' + r.app.focusSession.card().phase);
+  check(r.app.focusSession.card().hidden === false, 'and the card is up for it');
   r.pin(RUNNING({remaining_s: 1740, on_s: 60}));             // the next session starts: FOCUS
-  await r.app.focus.poll(); await shot();
-  check(r.app.focus.card().hidden === false && r.app.focus.card().clock === '29:00',
-        'the new session takes the card over: ' + r.app.focus.card().clock);
+  await r.app.focusSession.poll(); await shot();
+  check(r.app.focusSession.card().hidden === false && r.app.focusSession.card().clock === '29:00',
+        'the new session takes the card over: ' + r.app.focusSession.card().clock);
   // The report the page opened on armed a linger. Nothing polls by hand from here: the
   // interval is what must still be running when the linger's moment comes.
   await r.clock.advance(20000); await shot();
-  check(r.app.focus.card().hidden === false,
+  check(r.app.focusSession.card().hidden === false,
         'and the old report\'s linger does NOT reach in and put it away twelve seconds later');
   // The sharp end of this: if that linger had stopped the poll, the card would be frozen.
   // Pin a newer state, walk the clock, and it must move - a stopped poll cannot paint it.
   r.pin(RUNNING({remaining_s: 1620, on_s: 180}));
   await r.clock.advance(3000); await shot();
-  check(r.app.focus.card().clock === '27:00',
+  check(r.app.focusSession.card().clock === '27:00',
         'and the poll is still running - the card keeps up with the server: ' +
-        r.app.focus.card().clock);
+        r.app.focusSession.card().clock);
 }
 
 /* =========================================================================
@@ -354,21 +354,21 @@ group('the FOCUS button: start it, and end it');
     ? {ok: true, code: 'focus_started', answer: '30 minutes, sir. I have my eye on this one.',
        focus: RUNNING()}
     : {ok: true, code: 'focus_ended', answer: 'Session closed, sir.', focus: RUNNING({phase: 'ended'})})});
-  const pressed = p.app.focus.button();
+  const pressed = p.app.focusSession.button();
   await p.flush(3, 40);
   await pressed;
   const started = p.calls.filter(c => c.method === 'POST' && c.url.indexOf('/focus') >= 0);
   check(started.length === 1, 'the button posts once');
   check(started[0].body.action === 'start', 'with the start action: ' + JSON.stringify(started[0].body));
   check(started[0].body.minutes === 30, 'and thirty minutes by default');
-  check(p.app.focus.card().hidden === false, 'the card appears');
+  check(p.app.focusSession.card().hidden === false, 'the card appears');
   check(/30 minutes/.test(p.elements.get('answer-text').textContent), 'and he says so');
 }
 {
   const p = await page({states: [RUNNING()], post: () => ({ok: true, code: 'focus_ended',
     answer: 'Session closed, sir. 20 of 30 minutes.', focus: RUNNING({phase: 'ended'})})});
-  await p.app.focus.join(); await shot();
-  const pressed2 = p.app.focus.button(); await p.flush(3, 40); await pressed2;
+  await p.app.focusSession.join(); await shot();
+  const pressed2 = p.app.focusSession.button(); await p.flush(3, 40); await pressed2;
   const posted = p.calls.filter(c => c.method === 'POST' && c.url.indexOf('/focus') >= 0);
   check(posted.length === 1 && /end the session/.test(posted[0].body.text || ''),
         'with a session running the same button ends it: ' + JSON.stringify(posted[0] && posted[0].body));
@@ -378,9 +378,9 @@ group('the FOCUS button: start it, and end it');
   const p = await page({states: [IDLE], post: () => ({ok: false, status: 200, code: 'focus_home',
     answer: 'You are looking at me, sir, and I can only lock what is in front of you.',
     focus: IDLE})});
-  const pressed2 = p.app.focus.button(); await p.flush(3, 40); await pressed2;
-  check(p.app.focus.card().hidden === true, 'a refused start leaves the card off');
-  check(p.app.focus.button_face().pressed === 'false', 'and the button unpressed');
+  const pressed2 = p.app.focusSession.button(); await p.flush(3, 40); await pressed2;
+  check(p.app.focusSession.card().hidden === true, 'a refused start leaves the card off');
+  check(p.app.focusSession.button_face().pressed === 'false', 'and the button unpressed');
   check(/can only lock what is in front of you/.test(p.elements.get('answer-text').textContent),
         'and he explains why: ' + p.elements.get('answer-text').textContent.slice(0, 60));
   check(/NOTHING CHANGED/.test(p.elements.get('a-foot').textContent),
@@ -395,10 +395,10 @@ group('nothing about where you are can appear on screen');
   const SECRET_APP = 'com.tinyspeck.slackmacgap';
   const SECRET_HOST = 'work.example.com';
   const p = await page({states: [DRIFT({note: 'drift', speak: [VOICE(1, 'That is not where the work is, sir.')]})]});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   const surfaces = [
-    JSON.stringify(p.app.focus.card()),
-    JSON.stringify(p.app.focus.state()),
+    JSON.stringify(p.app.focusSession.card()),
+    JSON.stringify(p.app.focusSession.state()),
     p.elements.get('answer-text').textContent,
     p.elements.get('a-foot').textContent,
     p.elements.get('focus-meta').textContent,
@@ -413,7 +413,7 @@ group('nothing about where you are can appear on screen');
 {
   // the client asks for exactly what it needs, and nothing that could carry an identity
   const p = await page({states: [RUNNING()]});
-  await p.app.focus.join(); await shot();
+  await p.app.focusSession.join(); await shot();
   const health = p.calls.find(c => c.url.indexOf('/health') >= 0);
   check(!!health, 'the page asks /health at boot: ' + (health && health.url));
   check(p.calls.every(c => c.url.indexOf('/focus') < 0 || /\/focus(\?since=\d+)?$/.test(c.url)),

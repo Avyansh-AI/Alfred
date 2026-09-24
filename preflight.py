@@ -11,13 +11,16 @@ type the client never sends - and those are exactly what this file is for.
 
 It also never imports the app. If preflight cannot see something over HTTP, the browser
 cannot see it either. Check 13 wears another brain for a moment (and puts the config brain
-back before it finishes) so the swap is proven for real; --no-swap skips it.
+back before it finishes) so the swap is proven for real; --no-swap skips it. Check 14 starts
+a focus session for a few seconds, watches it tick with no browser open, and ends it again -
+a session that is already running is reported and left alone; --no-focus skips it.
 
     python3 preflight.py                       # the server on http://127.0.0.1:4700
     python3 preflight.py --url http://127.0.0.1:4711
     python3 preflight.py --json                # one JSON object, for scripts
     python3 preflight.py --config other.json   # a config other than ./config.json
     python3 preflight.py --no-swap             # skip check 13 (the brain swap)
+    python3 preflight.py --no-focus            # skip check 14 (the focus session probe)
 
 Marks:
 
@@ -501,74 +504,100 @@ def check_remember(report: Report, base: str, health: dict, brain_configured: bo
                     ["notes_dir=%r" % notes_dir, "start the server with --notes <folder>"])
         return
 
-    token = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
-    sentence = "remember that the preflight probe %s proves the write path end to end" % token
+    # Two random strings, and the reason matters. `handle` goes in the note AND in the
+    # question, so the question can name this one note and no other - which is what lets this
+    # check be run twice against the same server without crying wolf, because a long-lived
+    # server keeps every probe note from every earlier run in its memory, and a generic
+    # question matches all of them equally. `canary` goes in the note but never in the
+    # question, so the canary assertion below still proves the model READ the note rather
+    # than parroting the question back at us.
+    handle = "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+    canary = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
+    sentence = ("remember that the preflight probe %s proves the write path end to end "
+                "with canary %s" % (handle, canary))
     status, _h, body, err = post(base + "/remember", {"text": sentence}, timeout)
-    if status is None:
-        report.line("fail", name, "could not reach /remember (%s)" % err)
-        return
     data = as_json(body) or {}
-    if status != 200 or not data.get("ok"):
-        report.line("fail", name, "POST /remember -> HTTP %s" % status,
-                    ["code=%s" % data.get("code"), error_message(body)])
-        return
-
-    index = data.get("index")
+    # A file may exist in the vault from this moment on - even on a failure, because the
+    # server reports where it wrote before it complains. Whatever happens next, the vault is
+    # left exactly as it was found: a check that fails must not leave its own rubbish in your
+    # notes folder for the next run to trip over. (Learned the hard way: the early returns
+    # used to skip the tidy-up, and a red check 6 left a probe note behind.)
     rel = data.get("file") or ""
     path = os.path.join(notes_dir, rel) if rel else ""
-    on_disk = read_file(path) if path else None
-    problems = []
-    if not (data.get("filed") and data.get("indexed")):
-        problems.append("the server reported filed=%r indexed=%r" % (data.get("filed"), data.get("indexed")))
-    if on_disk is None:
-        problems.append("no file at %s" % (path or "(no path was reported)"))
-    else:
-        text = on_disk.decode("utf-8", "replace")
-        if token not in text:
-            problems.append("the file does not contain the words that were filed")
-        if time.strftime("%Y-%m-%d") not in text:
-            problems.append("the file carries no date")
-    if problems:
-        report.line("fail", name, "the capture did not land", problems)
-        return
 
-    # ... and the whole point: the note is answerable NOW, no rebuild and no restart.
-    question = "what is the preflight probe canary? tell me the code after 'probe'"
-    status2, _h2, body2, _err2 = post(base + "/chat", {"question": question}, timeout)
-    reply = as_json(body2) or {}
-    got = reply.get("nodes") or []
-    if index not in got:
-        report.line("fail", name, "the file was written but /chat cannot find it",
-                    ["%s is on disk (%d bytes), index %s" % (rel, len(on_disk), index),
-                     "asked: %s" % question,
-                     "/chat returned nodes %s" % got[:8],
-                     "filing a note indexes it immediately - if this fails, the write and the index disagree"])
-        return
-
-    answer = str(reply.get("answer") or "")
-    lines = ["file: %s (%d bytes)" % (rel, len(on_disk)),
-             "asked: %s" % question,
-             "/chat used node %s - the note filed a second earlier" % index]
-    if brain_configured and reply.get("ok") is not False and token not in answer.lower():
-        report.line("warn", name, "the file was written and found, but the answer came back without the canary",
-                    lines + ["the answer said: %r" % answer[:140]])
-    else:
-        report.line("pass", name, "wrote %s and /chat answered from it immediately" % rel, lines)
-
-    # Leave the vault as it was found. The index lives in memory, so the running server keeps
-    # this note until it restarts: say so rather than leaving a mystery for later.
-    if not keep:
+    def tidy():
+        if keep or not path:
+            return
         try:
-            os.remove(path)
-            folder = os.path.dirname(path)
-            if os.path.isdir(folder) and not os.listdir(folder):
-                os.rmdir(folder)
+            if os.path.exists(path):
+                os.remove(path)
+                folder = os.path.dirname(path)
+                if os.path.isdir(folder) and not os.listdir(folder):
+                    os.rmdir(folder)
             report.info("probe note removed again (%s); the running server holds it in memory "
                         "until it restarts" % rel)
         except OSError as exc:
-            report.info("could not remove the probe note: %s" % exc)
-    else:
-        report.info("probe note kept on disk: %s" % path)
+            report.info("could not remove the probe note (%s): %s" % (path, exc))
+
+    try:
+        if status is None:
+            report.line("fail", name, "could not reach /remember (%s)" % err)
+            return
+        if status != 200 or not data.get("ok"):
+            report.line("fail", name, "POST /remember -> HTTP %s" % status,
+                        ["code=%s" % data.get("code"), error_message(body),
+                         "the file %s" % (rel or "(no path was reported)")])
+            return
+
+        index = data.get("index")
+        on_disk = read_file(path) if path else None
+        problems = []
+        if not (data.get("filed") and data.get("indexed")):
+            problems.append("the server reported filed=%r indexed=%r"
+                            % (data.get("filed"), data.get("indexed")))
+        if on_disk is None:
+            problems.append("no file at %s" % (path or "(no path was reported)"))
+        else:
+            text = on_disk.decode("utf-8", "replace")
+            if handle not in text or canary not in text:
+                problems.append("the file does not carry both words that were filed")
+            if time.strftime("%Y-%m-%d") not in text:
+                problems.append("the file carries no date")
+        if problems:
+            report.line("fail", name, "the capture did not land", problems)
+            return
+
+        # ... and the whole point: the note is answerable NOW, no rebuild and no restart.
+        #    The question names this note by its own word and NOT by its canary, so it can
+        #    only be answered by a brain that really has the file - and so that running
+        #    preflight twice does not leave two probe notes racing for the same question.
+        question = ("which note carries the canary for the preflight probe %s? read it back "
+                    "to me" % handle)
+        status2, _h2, body2, _err2 = post(base + "/chat", {"question": question}, timeout)
+        reply = as_json(body2) or {}
+        got = reply.get("nodes") or []
+        if index not in got:
+            report.line("fail", name, "the file was written but /chat cannot find it",
+                        ["%s is on disk (%d bytes), index %s" % (rel, len(on_disk), index),
+                         "asked: %s" % question,
+                         "/chat returned nodes %s" % got[:8],
+                         "filing a note indexes it immediately - if this fails, the write and "
+                         "the index disagree"])
+            return
+
+        answer = str(reply.get("answer") or "")
+        lines = ["file: %s (%d bytes)" % (rel, len(on_disk)),
+                 "asked: %s" % question,
+                 "/chat used node %s - the note filed a second earlier" % index]
+        if brain_configured and reply.get("ok") is not False and canary not in answer.lower():
+            report.line("warn", name,
+                        "the file was written and found, but the answer came back without the canary",
+                        lines + ["the answer said: %r" % answer[:140]])
+        else:
+            report.line("pass", name, "wrote %s and /chat answered from it immediately" % rel,
+                        lines)
+    finally:
+        tidy()
 
 
 # --------------------------------------------------------------------------- #
@@ -838,12 +867,21 @@ def check_boot_dependencies(report: Report, timeout: float) -> None:
 # --------------------------------------------------------------------------- #
 # 12. incident: a note the brain cannot see (or a note that no longer exists)
 # --------------------------------------------------------------------------- #
-def check_notes_agree(report: Report, health: dict) -> None:
+def check_notes_agree(report: Report, health: dict, base: str, timeout: float) -> None:
     """incident 2026-09-23: notes are read when the server starts. A markdown file dropped
     into the folder while it runs is invisible ("I added a note and it will not answer from
     it"), and a file deleted while it runs stays in the index. Both are silent.
+
+    It reads the brain LIVE rather than from the boot snapshot everything else uses, and it
+    sets preflight's own probe notes aside on BOTH sides of the comparison: this check runs
+    after check 6 has filed a note, and a note filed during the run is exactly the kind of
+    thing that made it report a disagreement that was preflight's own doing.
     """
     name = "12. the notes on disk and the notes the server knows agree"
+    status, _h, body, _err = get(base + "/health", timeout)
+    live = as_json(body)
+    if isinstance(live, dict) and isinstance(live.get("notes"), int):
+        health = live                       # the live count, not the one from before check 6
     notes_dir = health.get("notes_dir")
     server_count = health.get("notes")
     source = str(health.get("notes_source") or "")
@@ -857,9 +895,15 @@ def check_notes_agree(report: Report, health: dict) -> None:
     if not os.path.isdir(notes_dir):
         report.line("fail", name, "the notes folder it reported does not exist: %s" % notes_dir)
         return
+    probe_prefix = "the-preflight-probe-"
     on_disk = 0
     for _dirpath, _dirs, files in os.walk(notes_dir):
-        on_disk += sum(1 for f in files if f.lower().endswith(".md") and not f.startswith("."))
+        for name in files:
+            if not name.lower().endswith(".md") or name.startswith("."):
+                continue
+            if name.lower().startswith(probe_prefix):
+                continue                    # preflight's own, from a run that was interrupted
+            on_disk += 1
     # Preflight's own probe notes are written and removed during a run: anything of that
     # shape still in the index is preflight's doing, not a mystery for the user to solve.
     titles = health.get("titles") or []
@@ -1002,6 +1046,157 @@ def check_swap(report: Report, base: str, config_path: str, health: dict, timeou
                 notes + ["config.json is byte-identical after the whole thing"])
 
 
+# 14. incident: a server that "watches" without watching, and a state with a name in it
+# --------------------------------------------------------------------------- #
+def focus_identity_leak(state) -> list:
+    """Anything in this state that looks like it names an app or a place.
+
+    The states carry his sentences too - a callout, a report card - but those are NESTED,
+    and the rule only ever applies to the top-level scalars, which are booleans, counters
+    and short enum words. A bundle id and a host name both carry a dot, a URL carries a
+    slash, and nothing legitimate here is longer than a couple of words, so this is a
+    structural check rather than a list of words to go looking for.
+    """
+    leaked = []
+    if not isinstance(state, dict):
+        return leaked
+    for key, value in state.items():
+        if isinstance(value, str) and (len(value) > 24 or any(ch in value for ch in "./:@\\")):
+            leaked.append("%s=%r" % (key, value))
+    return leaked
+
+
+
+def check_focus(report: Report, base: str, health: dict, timeout: float, enabled: bool) -> None:
+    """Added with the feature it checks, 2026-09-24.
+
+    The failure this exists for is invisible from a unit test: the tick is a THREAD inside a
+    server that lives for weeks, and the tempting way to write it - reading whatever an
+    app-switch notification last delivered - stops delivering, reports the first app forever,
+    and goes on cheerfully counting. Nothing errors. Nothing logs. The clock just stops
+    meaning anything. So this check insists that the running server, right now, takes a real
+    session from a real request, counts it down on its own with no browser open, asks the
+    front app FRESH every tick, and hands back a state with no identity in it anywhere.
+
+    It also refuses to touch a session that is already running - if you are mid-session when
+    you run preflight, it says so and leaves you alone.
+    """
+    name = "14. a focus session ticks on the server, and the state carries no name"
+    if not enabled:
+        report.line("warn", name, "not run (--no-focus)", [])
+        return
+    block = (health or {}).get("focus")
+    status, _h, body, err = get(base + "/focus", timeout)
+    if status != 200 or not as_json(body):
+        report.line("warn", name, "this server does not answer GET /focus (%s)"
+                    % (err or status),
+                    ["it is probably older than focus.py - restart it: kill the server and "
+                     "run python3 server.py"])
+        return
+    state = as_json(body)
+    if not block:
+        report.line("warn", name, "GET /focus answers, but /health carries no focus block",
+                    ["the server is older than the last edit; restart it"])
+        return
+
+    notes = []
+    # 1. nothing that names you may travel in the state - and the state a RUNNING session
+    #    hands back matters most, because that is when a reader has something to leak
+    if focus_identity_leak(state):
+        report.line("fail", name, "THE STATE CARRIES SOMETHING THAT NAMES YOU",
+                    focus_identity_leak(state)[:4] +
+                    ["the reader compares identities and throws them away; a name in this "
+                     "state is a name on the page"])
+        return
+
+    # 2. a session that is already running is the person's, not preflight's
+    if state.get("phase") in ("running", "paused"):
+        report.line("warn", name, "a session is already running (id %s, %s left) - not touched"
+                    % (state.get("id"), minutes(state.get("remaining_s") or 0)),
+                    ["end it, or wait for it, and run preflight again to prove the tick here"])
+        return
+
+    # 3. the tick itself, with no browser anywhere near it
+    started = post(base + "/focus", {"text": "thirty minutes on this"}, timeout)
+    reply = as_json(started[2]) or {}
+    if started[0] != 200 or not reply.get("ok"):
+        code = reply.get("code") or started[0]
+        hint = str(reply.get("answer") or reply.get("error") or "")[:160]
+        if code in ("focus_blind", "focus_home"):
+            report.line("warn", name,
+                        "a session cannot be started on this machine right now (%s)" % code,
+                        [hint, "the reader is a command (:focus.reader in /health, "
+                               "--focus-reader on the command line): on anything that is not "
+                               "a Mac it has to be pointed at one"])
+            return
+        report.line("fail", name, "POST /focus could not start a session (%s)" % code, [hint])
+        return
+    if focus_identity_leak(reply.get("focus")):
+        report.line("fail", name, "THE STATE CARRIES SOMETHING THAT NAMES YOU (the reply to "
+                    "starting a session)",
+                    focus_identity_leak(reply.get("focus"))[:4] +
+                    ["the reader compares identities and throws them away: a name that reaches "
+                     "this reply is a name on the page, and in the log, and on the way back"])
+        return
+    session_id = (reply.get("focus") or {}).get("id")
+    try:
+        before = (reply.get("focus") or {})
+        ticks_before = (before.get("timings") or {}).get("ticks", 0)
+        runs_before = (before.get("timings") or {}).get("reader_runs", 0)
+        left_before = before.get("remaining_s") or 0
+        time.sleep(2.6)
+        status2, _h2, body2, _e2 = get(base + "/focus", timeout)
+        after = as_json(body2) or {}
+        if focus_identity_leak(after):
+            report.line("fail", name, "THE STATE CARRIES SOMETHING THAT NAMES YOU (while running)",
+                        focus_identity_leak(after)[:4] +
+                        ["this is the state the page polls once a second"])
+            return
+        timings = after.get("timings") or {}
+        ticks = timings.get("ticks", 0) - ticks_before
+        runs = timings.get("reader_runs", 0) - runs_before
+        left_after = after.get("remaining_s") or 0
+        if ticks < 2 or left_after >= left_before:
+            report.line("fail", name, "THE CLOCK IS NOT MOVING: %d tick(s) in 2.6s, %.0fs still "
+                        "on it (was %.0fs)" % (ticks, left_after, left_before),
+                        ["the session lives on a thread in the server - a browser must not "
+                         "be needed for it to run"])
+            return
+        if runs < ticks:
+            report.line("fail", name, "%d tick(s) but only %d reader run(s): THE FRONT APP IS "
+                        "NOT BEING QUERIED FRESH" % (ticks, runs),
+                        ["a cached notification API reports the first app forever in a "
+                         "long-lived server: every tick must ask again"])
+            return
+        if after.get("reader") != "live":
+            report.line("warn", name, "the tick runs (%d in 2.6s) but the reader is not "
+                        "answering (%s)" % (ticks, after.get("reader_why")),
+                        ["a blind reader stops the clock rather than guessing - which is the "
+                         "honest behaviour, and it is why this cannot be proven here"])
+            return
+        if abs(int(after.get("grace_ms") or 0) - int((block.get("grace_ms") or 0))) or \
+                abs(float(after.get("tick_s") or 0) - float((block.get("tick_s") or 0))) > 0.01:
+            report.line("fail", name, "the state's knobs disagree with /health's",
+                        ["grace_ms %s/%s, tick_s %s/%s" % (after.get("grace_ms"),
+                                                           block.get("grace_ms"),
+                                                           after.get("tick_s"), block.get("tick_s"))])
+            return
+        notes.append("%d tick(s) in 2.6s with no browser open, %d fresh reader run(s), the "
+                     "clock down %.0fs" % (ticks, runs, left_before - left_after))
+        notes.append("a callout lands between TICK_S and TICK_S + GRACE_MS = %.0f..%.0fms "
+                     "(python3 tools/focus-timings.py prints the field numbers)"
+                     % (float(after.get("tick_s") or 0) * 1000.0,
+                        float(after.get("tick_s") or 0) * 1000.0 + float(after.get("grace_ms") or 0)))
+    finally:
+        # never leave the person sitting in a session preflight started for itself
+        stopped = as_json(post(base + "/focus", {"text": "end the session"}, timeout)[2]) or {}
+        if stopped.get("ok") and (stopped.get("report") or {}).get("counted"):
+            notes.append("note: the probe session was long enough to reach the ledger")
+    notes.append("session id %s, opened and closed by this check" % session_id)
+    report.line("pass", name, "a real session started, ticked, and closed with no browser "
+                "attached", notes)
+
+
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
@@ -1016,6 +1211,9 @@ def main(argv=None) -> int:
     ap.add_argument("--no-swap", action="store_true",
                     help="skip check 13 (it wears another brain for a moment, then puts the "
                          "config brain back)")
+    ap.add_argument("--no-focus", action="store_true",
+                    help="skip check 14 (it starts a focus session for a few seconds and "
+                         "ends it again - a session already running is left alone)")
     ap.add_argument("--json", action="store_true", help="print one JSON object instead of the report")
     ap.add_argument("--no-color", action="store_true", help="no colour codes")
     args = ap.parse_args(argv)
@@ -1059,8 +1257,9 @@ def main(argv=None) -> int:
     report.section("checks that exist because something actually broke")
     check_restart(report, health)
     check_boot_dependencies(report, args.timeout)
-    check_notes_agree(report, health)
+    check_notes_agree(report, health, base, args.timeout)
     check_swap(report, base, args.config, health, args.timeout, not args.no_swap)
+    check_focus(report, base, health, args.timeout, not args.no_focus)
 
     elapsed = time.time() - started
     total = report.passes + report.fails + report.warns

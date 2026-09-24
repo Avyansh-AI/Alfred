@@ -31,6 +31,12 @@ if command -v node >/dev/null 2>&1; then node tools/verify-sight.mjs | tail -6; 
 step "changing the brain: the chip, the routing, and the refusal rule (node tools/verify-brain.mjs)"
 if command -v node >/dev/null 2>&1; then node tools/verify-brain.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
 
+step "focus sessions: the card, the noise, and the ticks (node tools/verify-focus.mjs)"
+if command -v node >/dev/null 2>&1; then node tools/verify-focus.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
+
+step "preflight's focus check can fail: four servers, three wrong on purpose (python3 tools/verify-preflight.py)"
+python3 tools/verify-preflight.py | tail -6; mark ${PIPESTATUS[0]}
+
 step "server + brain end-to-end (python3 tools/verify.py)"
 python3 tools/verify.py | tail -8; mark ${PIPESTATUS[0]}
 
