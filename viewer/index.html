@@ -2666,7 +2666,13 @@ function paintFocus(state){
   }
   focusState = state;
   const live = state.phase === 'running' || state.phase === 'paused';
-  if (state.phase !== 'ended') focusRetired = false;
+  if (state.phase !== 'ended'){
+    // a session that is not over cancels the retiral it inherited: a page opened while the
+    // LAST report was still up on the server must not put THIS session's card away twelve
+    // seconds later, which is exactly what a pending linger used to do
+    focusRetired = false;
+    clearFocusLinger();
+  }
   if (focusRetired) return;            // the report card has been shown and put away
   card.hidden = false;
   card.className = state.phase === 'ended' ? 'ended'
@@ -2676,7 +2682,10 @@ function paintFocus(state){
                                : state.phase === 'paused' ? 'focus \u00b7 paused' : 'focus';
   $('focus-tier').textContent = state.drifting ? ('tier ' + state.tier) : '';
   $('focus-tier').className = state.drifting ? 'fc-tier on' : 'fc-tier';
-  $('focus-clock').textContent = focusClock(state.remaining_s);
+  // the clock counts down while it is running, and reads as the time you actually spent
+  // once the session is closed: "SESSION CLOSED 29:52" would look like it was still going
+  $('focus-clock').textContent = state.phase === 'ended'
+      ? focusClock(state.elapsed_s) : focusClock(state.remaining_s);
   const done = state.planned_s ? Math.min(100, Math.max(0,
       ((state.planned_s - state.remaining_s) / state.planned_s) * 100)) : 0;
   $('focus-fill').style.width = state.phase === 'ended' ? '100%' : (done.toFixed(1) + '%');
@@ -2761,6 +2770,9 @@ async function pollFocus(){
   } catch (err){ /* the server is away: the card keeps the last state it had */ }
 }
 
+function clearFocusLinger(){
+  if (focusLinger){ clearTimeout(focusLinger); focusLinger = null; }
+}
 function startFocusPoll(){
   if (focusPoll) return;
   focusPoll = setInterval(pollFocus, FOCUS_POLL_MS);

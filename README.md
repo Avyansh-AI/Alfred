@@ -674,6 +674,13 @@ only - sessions, minutes on, minutes planned, drifts, refunds, the streak and th
 - and never an app, a site or a sentence about your day. A session shorter than 30 seconds is
 called what it is (*"a poke, not a session"*) and is not written down at all.
 
+The card stops counting when the session closes and reads the time you actually gave it -
+`SESSION CLOSED 00:09` for a poke - then puts itself away after twelve seconds
+(`FOCUS_CARD_LINGER_MS`), and no later poll can bring it back. A session started in the
+meantime is watched normally: the retiral the *old* report armed is cancelled the moment a
+live state arrives. That last sentence is a bug worth naming - a page opened while a report
+was still on the server used to freeze its next session's card twelve seconds in.
+
 ### Try it yourself
 
 ```bash
@@ -689,6 +696,10 @@ python3 tools/focus-timings.py       # in another terminal, while a session runs
    said, and the time is still counted against you.
 4. Say **"it's okay, I'm doing research"**: the excursions stop counting and the card clears.
 5. Say **"end the session"** and listen to the report card.
+
+The screenshots are `tools/screenshots/focus-drift.jpg` (the card tinted, tier 1, with the
+counters) and `tools/screenshots/focus-report.jpg` (the report card on the answer card, with
+the ledger line in the footer).
 
 On anything that is not a Mac, or for a demo, point the server at a script of your own:
 

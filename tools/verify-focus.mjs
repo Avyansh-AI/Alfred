@@ -297,7 +297,9 @@ group('the report card: spoken, on-screen, and honest about the ledger');
   const p = await page({states: [report]});
   await p.app.focus.join(); await shot();
   check(p.app.focus.card().phase === 'session closed', 'the card says the session is closed');
-  check(p.app.focus.card().clock === '00:00', 'the clock is at zero');
+  check(p.app.focus.card().clock === '30:00',
+        'a closed card shows the time the session took, not a countdown still running: ' +
+        p.app.focus.card().clock);
   check(/93% clean/.test(p.app.focus.card().state), 'and reads the clean percentage');
   const shown = p.elements.get('answer-text').textContent;
   check(/28 of 30 minutes on target/.test(shown), 'the report card is on the answer card: ' + shown);
@@ -316,6 +318,31 @@ group('the report card: spoken, on-screen, and honest about the ledger');
   check(/not in the ledger/.test(q.elements.get('a-foot').textContent),
         'a session too short to count says so on the footer: ' +
         q.elements.get('a-foot').textContent);
+
+  // The page opened while the LAST report was still on the server: a linger is armed for it,
+  // and then a new session starts. The linger must not reach in and put the new card away -
+  // the bug this pins down was a card that froze mid-session, eight seconds in.
+  const r = await page({states: [report]});                  // the page opens on the old report
+  await r.app.focus.join(); await shot();
+  check(/session closed/.test(r.app.focus.card().phase),
+        'a page opened on a finished session shows it: ' + r.app.focus.card().phase);
+  check(r.app.focus.card().hidden === false, 'and the card is up for it');
+  r.pin(RUNNING({remaining_s: 1740, on_s: 60}));             // the next session starts: FOCUS
+  await r.app.focus.poll(); await shot();
+  check(r.app.focus.card().hidden === false && r.app.focus.card().clock === '29:00',
+        'the new session takes the card over: ' + r.app.focus.card().clock);
+  // The report the page opened on armed a linger. Nothing polls by hand from here: the
+  // interval is what must still be running when the linger's moment comes.
+  await r.clock.advance(20000); await shot();
+  check(r.app.focus.card().hidden === false,
+        'and the old report\'s linger does NOT reach in and put it away twelve seconds later');
+  // The sharp end of this: if that linger had stopped the poll, the card would be frozen.
+  // Pin a newer state, walk the clock, and it must move - a stopped poll cannot paint it.
+  r.pin(RUNNING({remaining_s: 1620, on_s: 180}));
+  await r.clock.advance(3000); await shot();
+  check(r.app.focus.card().clock === '27:00',
+        'and the poll is still running - the card keeps up with the server: ' +
+        r.app.focus.card().clock);
 }
 
 /* =========================================================================
