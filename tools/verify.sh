@@ -80,6 +80,12 @@ else
   code=${PIPESTATUS[0]}
   [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
   mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
+
+  step "real browser focus: wander off, hear the callout, reload, come home, hear the report"
+  node tools/browser-focus-check.mjs 2>&1 | tail -18
+  code=${PIPESTATUS[0]}
+  [ "$code" -eq 2 ] && echo "   -> skipped (no browser available; see tools/browser-check.mjs header)"
+  mark $([ "$code" -eq 2 ] && echo 0 || echo "$code")
 fi
 
 printf '\n\033[1m== summary\033[0m\n%d groups passed, %d failed\n' "$pass" "$fail"

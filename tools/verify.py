@@ -1429,6 +1429,7 @@ def main():
               and abs(service.session["on_s"] - on_before) < 1e-6,
               "NO TIME IS COUNTED EITHER WAY WHILE HE CANNOT SEE (the clock is stopped)")
         check(service.public_state(now=t)["drifts"] == 0, "and no drift is invented")
+
         scripted.write("com.google.Chrome", "https://work.example.com/board/42")
         service.tick_once(now=t + 2.0)
         t += 2.0
@@ -1437,6 +1438,31 @@ def main():
         spoken, marker = said_since(service, t, marker)
         check(any("see the front app again" in c["text"] for c in spoken),
               "out loud, so a stopped clock cannot be mistaken for a quiet one")
+
+        # -- a gap in the ticks: load is counted, a sleep is not
+        #
+        # Two seconds late happens on any busy machine, and those seconds were real time
+        # with him watching, so they are counted. An hour in one step is a laptop that was
+        # shut or a server that was not running: NONE of it is counted, because a timer that
+        # invents time on target is worse than no timer. The seconds he refused to invent
+        # are kept as a number of their own, so a session that slept can be explained later.
+        service.tick_once(now=t + 1.0)
+        t += 1.0
+        on_before, dropped_before = service.session["on_s"], service.timings["gap_dropped_s"]
+        service.tick_once(now=t + 3.0)                     # a late tick: under the cap
+        t += 3.0
+        check(abs((service.session["on_s"] - on_before) - 3.0) < 1e-6,
+              "a tick that is three seconds late counts all three (the machine was busy)")
+        check(service.timings["gap_dropped_s"] == dropped_before,
+              "and drops none of them")
+        on_before = service.session["on_s"]
+        service.tick_once(now=t + 3600.0)                  # a laptop that slept for an hour
+        t += 3600.0
+        check(service.session["on_s"] == on_before,
+              "a gap of an HOUR counts NOTHING (nobody was watching, so nothing is invented)")
+        check(service.timings["gap_dropped_s"] - dropped_before == 3600.0,
+              "and the hour he refused to count is on the record: %.0fs dropped"
+              % service.timings["gap_dropped_s"])
 
         # -- the report card and the ledger
         report = service.finish("end")

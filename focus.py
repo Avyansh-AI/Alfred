@@ -68,9 +68,15 @@ import urllib.parse
 TICK_S = 1.0                    # the tick. One second, by requirement, not by taste
 GRACE_MS = 800                  # a switch shorter than this is a flick, not a drift
 READER_TIMEOUT_MS = 1500        # one read may take this long before it is a failed read
-TICK_GAP_MAX_S = 5.0            # the most one tick may count. A laptop that slept for eight
-                                # hours did not spend eight hours in the wrong app, and a
-                                # session that freezes while he could not see is honest
+TICK_GAP_MAX_S = 10.0           # the longest gap between two ticks he will account for.
+                                # A longer gap is a machine that was asleep, or a server that
+                                # was not running: he counts NONE of it, because he was not
+                                # watching, and inventing time on target is the one thing a
+                                # timer like this must never do. Everything shorter is counted
+                                # in full - measured, not assumed: a browser reloading under
+                                # software rendering still gave 12 ticks accounting for 12.0s
+                                # across 11.8s of wall clock (tools/browser-focus-check.mjs
+                                # prints those numbers from every run).
 READER_FAIL_PATIENCE = 3        # consecutive failed reads before he admits he is blind
 READER_LOG_EVERY_S = 30.0       # while blind, say so at most this often
 
@@ -258,6 +264,7 @@ TIMING_FIELDS = frozenset((
     "ticks", "tick_ms_last", "tick_ms_avg", "tick_ms_max", "reader_ms_last",
     "reader_ms_avg", "reader_ms_max", "reader_runs", "reader_fails", "detect_ms",
     "callout_ms", "nag_gap_ms", "tick_lag_ms", "tick_lag_max_ms", "blind_since_s",
+    "gap_dropped_s",
 ))
 
 
@@ -617,6 +624,7 @@ class FocusService:
             "reader_ms_last": 0, "reader_ms_avg": 0.0, "reader_ms_max": 0,
             "reader_runs": 0, "reader_fails": 0, "detect_ms": 0, "callout_ms": 0,
             "nag_gap_ms": 0, "tick_lag_ms": 0, "tick_lag_max_ms": 0, "blind_since_s": 0.0,
+            "gap_dropped_s": 0.0,
         }
         self._thread = None
         self._stop = threading.Event()
@@ -656,9 +664,13 @@ class FocusService:
                     self.timings["tick_lag_ms"] = int(lag * 1000)
                     self.timings["tick_lag_max_ms"] = max(self.timings["tick_lag_max_ms"],
                                                           int(lag * 1000))
+            # The cadence stays aligned to the wall clock, and a backlog is never spun
+            # through: when a tick runs late it accounts for the whole gap itself (dt is
+            # measured from the last tick), so the next one simply starts a fresh second
+            # from now. Catch-up ticks would each spawn a reader for a second nobody lived.
             next_at += self.tick_s
-            if next_at < time.monotonic() - 5 * self.tick_s:
-                next_at = time.monotonic() + self.tick_s    # fell a long way behind
+            if next_at < time.monotonic():
+                next_at = time.monotonic() + self.tick_s
 
     # -- the tick ---------------------------------------------------------- #
     def tick_once(self, now=None) -> bool:
@@ -684,10 +696,16 @@ class FocusService:
             anchor = self._last_tick
             if anchor is None:
                 anchor = (self.session or {}).get("anchor", now) if self.session else now
-            dt = max(0.0, min(now - anchor, TICK_GAP_MAX_S))
+            gap = now - anchor
+            # a gap longer than the cap is not time he watched: they slept, or the server did
+            dt = gap if 0.0 <= gap <= TICK_GAP_MAX_S else 0.0
             self._last_tick = now
             self.last_verdict = verdict
             t = self.timings
+            if gap > TICK_GAP_MAX_S:
+                # keep the number of seconds he refused to invent, so a session that slept is
+                # explainable afterwards rather than mysterious
+                t["gap_dropped_s"] = round(float(t["gap_dropped_s"]) + gap, 1)
             t["ticks"] += 1
             t["reader_ms_last"] = int(read_ms)
             t["reader_ms_max"] = max(t["reader_ms_max"], int(read_ms))

@@ -637,6 +637,12 @@ Two numbers make this honest rather than clever:
   callout lands between `TICK_S` and `TICK_S + GRACE_MS` - **1.0s to 1.8s** at the defaults,
   depending on where in the second you wandered. A callout cannot be instantaneous, and a late
   one is not automatically the grace's fault.
+* a tick that arrives late counts all of the time since the last one, up to `TICK_GAP_MAX_S`:
+  a machine under load was still being watched, so those seconds are real. A **longer** gap -
+  a laptop that was shut, a server that was not running - counts **nothing at all**, not a
+  rounded-down part of it, and the seconds he refused to count are kept as `gap_dropped_s` in
+  the timings so a session that slept is a number you can look up rather than a mystery. A
+  timer that invents minutes on target is worse than no timer.
 * every knob is a named constant at the top of `focus.py` - `TICK_S`, `GRACE_MS`,
   `TIER_2_AFTER_S`, `TIER_3_AFTER_S`, `NAG_S`, `SNOOZE_S`, `CLEAN_PCT`,
   `LEDGER_MIN_SESSION_S`, `CALLOUT_REPLAY_S`, `REMEMBER_LAST_PLACE_S`, `TICK_GAP_MAX_S`.
@@ -697,9 +703,21 @@ python3 tools/focus-timings.py       # in another terminal, while a session runs
 4. Say **"it's okay, I'm doing research"**: the excursions stop counting and the card clears.
 5. Say **"end the session"** and listen to the report card.
 
+Doing it by hand is the demo; the acceptance test is committed. `tools/browser-focus-check.mjs`
+runs those five steps in a real browser against a real `server.py`, with one substitution - the
+front-app reader is a two-line shell script reading a file, because that is the documented
+extension point and it is how the feature is verified on anything that is not a Mac. It puts two
+files in a scratch directory, writes the second one when it wants you to wander off, and
+measures the things the requirements are written in: **the callout timed from the write to the
+speech engine having the line** (so "within three seconds" is a number), never faster than
+`GRACE_MS`, a deep link *inside* the work site staying on target, a reload rejoining the same
+session id with the clock still counting down, snooze, home base, the report spoken as well as
+written, the ledger's keys, and a sweep of the page, the state and the server log for the app,
+the host or the path. It is `tools/verify.sh`'s last group.
+
 The screenshots are `tools/screenshots/focus-drift.jpg` (the card tinted, tier 1, with the
 counters) and `tools/screenshots/focus-report.jpg` (the report card on the answer card, with
-the ledger line in the footer).
+the ledger line in the footer); the check also writes `focus-running.jpg`.
 
 On anything that is not a Mac, or for a demo, point the server at a script of your own:
 
@@ -796,6 +814,7 @@ mock never does.
 | `tools/browser-sight-check.mjs` | the real thing, in a real browser with a real `getDisplayMedia` share, photographed at every step |
 | `tools/verify-brain.mjs` | "change its brain by voice" under test: the chip's label, command-vs-question routing, the refusal, a swap during a live share |
 | `tools/verify-focus.mjs` | focus sessions in the page under test: the card, the clock that only ever comes from the server, the tint on drift, the spoken callout, the report card, and an identity sweep across every on-screen surface |
+| `tools/browser-focus-check.mjs` | the live loop in a real browser against a real server: FOCUS, wander off, the callout timed in milliseconds, the reload, the snooze, home base, the spoken report, the ledger, and no identity anywhere |
 | `tools/focus-timings.py` | prints the focus timings from a running server - the knobs, the band, the field numbers and a reading of them - before anybody touches `GRACE_MS` |
 | `tools/verify-preflight.py` | proves preflight's focus check can fail: four stub servers, three wrong on purpose, each failure asserted with its reason |
 | `tools/fixtures/fake-focus-server.py` | those stubs: a focus server over HTTP that is wrong in one specific way (a frozen clock, a reader never asked again, a state carrying a name) |
@@ -805,7 +824,7 @@ mock never does.
 | `server.py` - "THE PERSONA" | the whole character, in one commented block at the top of the file |
 | `tools/browser-voice-check.mjs` | drives the voice layer in a real browser with a speech spy and a fake mic |
 | `tools/browser-provenance-check.mjs` | the real server, the real notes, three questions, three photographs |
-| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`, `sight-*.jpg`, `brain-*.jpg`) |
+| `tools/screenshots/` | screenshots produced by those checks (`galaxy.jpg`, `galaxy-focused.jpg`, `ask.jpg`, `voice.jpg`, `voice-muted.jpg`, `greeting.jpg`, `provenance-*.jpg`, `capture-*.jpg`, `sight-*.jpg`, `brain-*.jpg`, `focus-*.jpg`) |
 | `tools/vendor.py` | optional: keeps a local copy of the CDN files in `viewer/vendor/` |
 
 ## If your network blocks CDNs
@@ -942,6 +961,14 @@ npm - which is exactly the situation this project was verified in.
   drawn frame (pixel statistics), click-to-fly, panel contents, camera framing, the ask bar,
   the idle drift, keyboard shortcuts and the offline fallback. Needs Chrome; skip it with
   `SKIP_BROWSER=1 ./tools/verify.sh`.
+* `tools/browser-focus-check.mjs` - the focus loop end to end in a real browser: the FOCUS button
+  starts a real session on a real server, the front-app reader is a shell script reading a file,
+  and the callout is timed from the file changing to the speech engine having the line - so the
+  requirement written as "within three seconds" is checked as a number, and a callout that beat
+  the grace fails rather than passes. It then reloads the tab mid-session (same id, clock still
+  going down, nothing replayed at you), snoozes, comes home, ends the session from the ask bar
+  and checks the report is *spoken* as well as written, that the ledger holds numbers only, and
+  that the app, the host and the path appear nowhere on screen, in the state or in the server log.
 * `tools/browser-provenance-check.mjs` - starts the real `server.py` against the real notes and a
   stubbed model, then asks the three questions above in a real browser and checks what the
   galaxy did: camera units moved, which nodes are lit, the panel contents, what was spoken, and
