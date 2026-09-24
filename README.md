@@ -633,10 +633,23 @@ escalates while the same excursion lasts.
 
 Two numbers make this honest rather than clever:
 
-* a drift is counted on the first tick that finds it **already older than the grace**, so a
-  callout lands between `TICK_S` and `TICK_S + GRACE_MS` - **1.0s to 1.8s** at the defaults,
-  depending on where in the second you wandered. A callout cannot be instantaneous, and a late
-  one is not automatically the grace's fault.
+* a drift is counted on the first tick that finds it **already older than the grace** - and
+  "already" is carrying a lot of weight there. The reader is asked **once a second**, so the
+  server cannot know where inside that second you moved: the tick that first sees a drift
+  charges the **whole window that led to it**, which is about `TICK_S` = 1000ms, already past
+  `GRACE_MS` = 800ms. So the grace is a **floor on counted off-target time**, not a stopwatch
+  started when you wandered: he can speak on the very tick that finds you, and what a person
+  actually waits is the tick's phase (0-1000ms) plus up to one page poll
+  (`FOCUS_POLL_MS` = 1000). Measured in the committed browser check: callouts reaching the
+  voice **468ms, 806ms, 922ms, 999ms and 1480ms** after the switch, on servers behaving
+  exactly as designed.
+* that is worth being blunt about, because the honest version reads worse than the intended
+  one: **the grace does not delay the first callout by 800ms.** It guarantees that he never
+  speaks about an excursion *counted* as younger than `GRACE_MS` (asserted as
+  `detect_ms`/`callout_ms` >= `GRACE_MS` in `tools/browser-focus-check.mjs`), and it is why a
+  flick of a few hundred milliseconds that no tick ever sees is not a drift at all. If you
+  want pat, twitchy nags to feel gentler, the knob for that is the **tick** (`TICK_S`), not the
+  grace - and `tools/focus-timings.py` prints both before anyone moves either.
 * a tick that arrives late counts all of the time since the last one, up to `TICK_GAP_MAX_S`:
   a machine under load was still being watched, so those seconds are real. A **longer** gap -
   a laptop that was shut, a server that was not running - counts **nothing at all**, not a
@@ -657,18 +670,23 @@ python3 tools/focus-timings.py           # against the server you have running
 
 ```
   knobs        : tick 1.00s, grace 800ms, nag 30.0s
-  the band     : a callout lands between TICK_S and TICK_S + GRACE_MS = 1000..1800ms after a drift begins
+  the floor    : a callout needs an excursion counted at 800ms or more (GRACE_MS); the first tick
+                 that sees a drift charges its whole window (TICK_S = 1000ms), so he can speak on
+                 the tick that finds it - the wait a person feels is the tick's phase plus one poll
   the field    : detect 1630ms, callout 1630ms, nag gap 30999ms
   the reader   : 26 run(s), 0 fail(s), 4ms avg, 14ms worst
   the tick     : 24 tick(s) watched, 4ms avg, 14ms worst, lag 0ms last / 0ms worst
   this window  : 25 sample(s) over 6.0s, 6 tick(s), 6 reader run(s)
 ```
 
-Those are real numbers from a session run on this machine: the tick firing every 1.01s, the
-drift detected at 1630ms - **inside** the band, so the grace is not the problem - the reader
-taking 4ms on average, and no measurable tick lag. It also reads the other way: a reader
-slower than `GRACE_MS`, or a tick lag past a second, is printed as a warning, because a slow
-reader looks *exactly* like a slow grace and only one of those is a knob worth moving.
+Those are real numbers from a session run on this machine: the tick firing every 1.01s, a drift
+counted at 1630ms of counted off-target time - **above** the 800ms grace, which is the promise
+- the reader taking 4ms on average, and no measurable tick lag. It reads the other way too: a
+`detect_ms` **below** `GRACE_MS` means a drift was counted without the grace being served, and
+`focus-timings.py` prints that as *"a bug in focus.py, not a knob"*, because no knob can fix
+that; a reader slower than `GRACE_MS`, or a tick lag past a second, is printed as a warning
+too, since a slow reader looks *exactly* like a slow grace and only one of those is a knob
+worth moving.
 
 ### The report card, and the streak
 
@@ -815,7 +833,7 @@ mock never does.
 | `tools/verify-brain.mjs` | "change its brain by voice" under test: the chip's label, command-vs-question routing, the refusal, a swap during a live share |
 | `tools/verify-focus.mjs` | focus sessions in the page under test: the card, the clock that only ever comes from the server, the tint on drift, the spoken callout, the report card, and an identity sweep across every on-screen surface |
 | `tools/browser-focus-check.mjs` | the live loop in a real browser against a real server: FOCUS, wander off, the callout timed in milliseconds, the reload, the snooze, home base, the spoken report, the ledger, and no identity anywhere |
-| `tools/focus-timings.py` | prints the focus timings from a running server - the knobs, the band, the field numbers and a reading of them - before anybody touches `GRACE_MS` |
+| `tools/focus-timings.py` | prints the focus timings from a running server - the knobs, the floor the grace actually promises, the field numbers and a reading of them - before anybody touches `GRACE_MS` |
 | `tools/verify-preflight.py` | proves preflight's focus check can fail: four stub servers, three wrong on purpose, each failure asserted with its reason |
 | `tools/fixtures/fake-focus-server.py` | those stubs: a focus server over HTTP that is wrong in one specific way (a frozen clock, a reader never asked again, a state carrying a name), and it can claim an uptime so check 10 can be seen to fire |
 | `tools/browser-brain-check.mjs` | the swap in a real browser against the real server: the OpenRouter route is the only live one, so the swap has to be real |

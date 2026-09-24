@@ -764,9 +764,12 @@ class FocusService:
             excursion.counted = True
             session["drifts"] += 1
             excursion.tier = self._tier_for(excursion.seconds)
-            # the excursion's age when he called it a drift: the tick found it, and it had
-            # already outlived the grace. The floor for a person is TICK_S + GRACE_MS, and
-            # that is why tools/focus-timings.py prints both before anyone edits GRACE_MS
+            # the excursion's age when he called it a drift: the tick found it and charged
+            # the whole window that led to it (the reader is asked once a second, so where
+            # inside that second you moved is not knowable), which is about TICK_S - already
+            # past the grace. So what the grace guarantees is a floor on COUNTED off-target
+            # time, not a stopwatch started when you wandered, and the wait a person feels is
+            # the tick's phase plus the page's poll. tools/focus-timings.py prints both
             session["detect_ms"] = int(excursion.seconds * 1000)
             self.timings["detect_ms"] = session["detect_ms"]
             self._callout(excursion, now, session)

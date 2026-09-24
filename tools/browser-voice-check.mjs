@@ -147,7 +147,8 @@ const heard = spoken.spoken.filter(t => t && t.trim());
 const greeting = heard.find(t => /notes indexed/.test(t)) || null;
 check(!!greeting, 'the page greeted on load: "' + (greeting || 'nothing') + '"');
 const said = greeting ? heard.filter(t => t !== greeting) : heard;
-check(said.length === 1, 'the answer was handed to the speech engine once (' + said.length + ')');
+check(said.length === 1, 'the answer was handed to the speech engine once ('
+      + said.length + ': ' + JSON.stringify(said).slice(0, 240) + ')');
 const spokeTheAnswer = said[0] && (spoken.answer.startsWith(said[0].slice(0, 40)) || said[0].length > 20);
 check(spokeTheAnswer, 'what it speaks is the answer: "' + (said[0] || '').slice(0, 60) + '…"');
 check(spoken.chosen === 'en-GB', 'the British voice was chosen from the list (en-GB)');

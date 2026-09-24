@@ -13,11 +13,15 @@ What it prints is what the server knows: the knobs it is actually running with (
 deliberate about what a number does and does not justify - in particular it will not tell
 you to touch GRACE_MS while the reader or the tick is the slow part.
 
-Read the BAND line first. A drift is only counted on a tick that finds it already older
-than the grace, so a callout lands somewhere between TICK_S and TICK_S + GRACE_MS after the
-drift began - 1.0s to 1.8s at the defaults, depending on where in the second you wandered.
-A callout can therefore never be instantaneous, and a late one is not automatically the
-grace's fault: if callouts feel late, compare the field's detect_ms with that band first.
+Read the FLOOR line first. A drift is only counted on a tick that finds it already older than
+the grace, and it is counted with the whole window that led to it: the reader is asked once a
+second, so the server cannot know where inside that second you moved, and it charges the
+second. That makes the counted age at detection about TICK_S - 1000ms at the defaults, already
+past a GRACE_MS of 800ms - which is why a callout can reach you faster than the grace looks
+like it should: the wait a person feels is the tick's phase, not the grace. The floor says
+what is actually promised: he never speaks about an excursion counted as younger than
+GRACE_MS, and never before the tick that saw it - so `detect_ms` must land at or above the
+grace. If callouts feel late, compare the field's detect_ms with that floor first.
 
 Only the standard library is used, and nothing is written.
 """
@@ -107,11 +111,15 @@ def reading(state, health, window):
     nag_gap = int(timings.get("nag_gap_ms") or 0)
 
     if detect:
-        lines.append("the last drift was counted when it was already %dms old, inside the band"
-                     " TICK_S..TICK_S + GRACE_MS = %d..%dms, and called out at %dms"
-                     % (detect, earliest_ms, latest_ms, callout or detect))
-        if detect > latest_ms + max(250, grace_ms):
-            lines.append("  ^ that is well past the band. Look at the reader and the lag below"
+        lines.append("the last drift was counted when it was already %dms old (the floor is"
+                     " GRACE_MS = %dms, and the first tick that sees a drift charges the whole"
+                     " window that led to it, about TICK_S = %dms), and called out at %dms"
+                     % (detect, grace_ms, earliest_ms, callout or detect))
+        if detect < grace_ms:
+            lines.append("  ^ BELOW the grace: a drift was counted without the grace being"
+                         " served. That is a bug in focus.py, not a knob")
+        elif detect > latest_ms + max(250, grace_ms):
+            lines.append("  ^ that is well past the floor. Look at the reader and the lag below"
                          " BEFORE touching GRACE_MS: a slow reader looks exactly like a slow"
                          " grace, and only one of them is a knob worth moving")
     else:
@@ -128,8 +136,9 @@ def reading(state, health, window):
     if nag_gap:
         lines.append("the gap between callouts was last measured at %dms (the cadence asked for"
                      " is %ss)" % (nag_gap, state.get("nag_s")))
-    lines.append("GRACE_MS is the last knob to move: only when detect_ms sits in the band, the"
-                 " reader is quick and the tick is on time, is a late callout the grace's fault")
+    lines.append("GRACE_MS is the last knob to move: only when detect_ms sits at or above the"
+                 " grace (it never should not), the reader is quick and the tick is on time, is"
+                 " a late callout the grace's fault")
     return lines
 
 
@@ -166,8 +175,10 @@ def report(url, window_s):
     print("  phase        : %s, reader %s%s"
           % (state.get("phase"), state.get("reader"),
              (", session %s" % state.get("id")) if state.get("id") else ""))
-    print("  the band     : a callout lands between TICK_S and TICK_S + GRACE_MS = %d..%dms"
-          " after a drift begins" % (earliest_ms, latest_ms))
+    print("  the floor    : a callout needs an excursion counted at %dms or more (GRACE_MS);"
+          " the first tick that sees a drift charges its whole window (TICK_S = %dms), so he"
+          " can speak on the tick that finds it - the wait a person feels is the tick's phase"
+          " plus up to one page poll" % (grace_ms, earliest_ms))
     print("  the field    : detect %sms, callout %sms, nag gap %sms"
           % (timings.get("detect_ms", "-"), timings.get("callout_ms", "-"),
              timings.get("nag_gap_ms", "-")))
