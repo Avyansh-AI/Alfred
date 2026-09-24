@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.request
 import base64
+import re
 import struct
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -155,6 +156,48 @@ def drain(proc, sink):
     return t
 
 
+FOCUS_READER_SCRIPT = """#!/bin/sh
+# The front-app reader, scripted: line 1 is the frontmost app, line 2 is the active tab's
+# URL. The real one asks macOS the same two questions with osascript; this one makes a
+# drift something a test can time.
+cat "%(front)s"
+"""
+
+
+class ScriptedReader:
+    """A real reader process on disk: a shell script the tests drive through a file."""
+
+    def __init__(self, workdir):
+        self.dir = workdir
+        self.front = os.path.join(workdir, "front.txt")
+        self.script = os.path.join(workdir, "reader.sh")
+        with open(self.script, "w") as fh:
+            fh.write(FOCUS_READER_SCRIPT % {"front": self.front})
+        os.chmod(self.script, 0o755)
+        self.write("com.google.Chrome", "https://work.example.com/board/42")
+
+    def write(self, app, url=""):
+        """Point the reader at a place. Also puts a working script back: a test that ends
+        a broken-reader experiment says so by writing again."""
+        with open(self.script, "w") as fh:
+            fh.write(FOCUS_READER_SCRIPT % {"front": self.front})
+        os.chmod(self.script, 0o755)
+        with open(self.front, "w") as fh:
+            fh.write("%s\n%s\n" % (app, url))
+
+    def break_it(self, mode="fail"):
+        """Make the reader useless: a non-zero exit, silence, or a hang."""
+        if mode == "fail":
+            body = "exit 3\n"
+        elif mode == "empty":
+            body = "exit 0\n"
+        else:
+            body = "sleep 30\n"
+        with open(self.script, "w") as fh:
+            fh.write("#!/bin/sh\n" + body)
+        os.chmod(self.script, 0o755)
+
+
 def start_server(port, config_path, extra=None):
     cmd = [PY, "-u", os.path.join(ROOT, "server.py"),
            "--port", str(port), "--host", "127.0.0.1",
@@ -187,7 +230,7 @@ def main():
     print("  python       : %s" % sys.version.split()[0])
 
     # ------------------------------------------------------------------ build
-    print("\n[1/11] indexer")
+    print("\n[1/12] indexer")
     build = subprocess.run([PY, os.path.join(ROOT, "build.py"), "--check", "--quiet"],
                            cwd=ROOT, capture_output=True, text=True)
     check(build.returncode == 0, "build.py --check exits cleanly: %s" % (build.stdout.strip() or build.stderr.strip()))
@@ -227,7 +270,7 @@ def main():
         return 1
 
     # ------------------------------------------------------------------ server
-    print("\n[2/11] server + static files")
+    print("\n[2/12] server + static files")
     port = args.port or 4700
     if request("http://127.0.0.1:%d/" % port, timeout=1)[0] is not None:
         if args.port:
@@ -237,6 +280,8 @@ def main():
         print("  note  port 4700 is busy (the live server is probably up) - verifying on %d instead" % port)
 
     stub, stub_port = start_stub()
+    LOG = []                                       # the server's own log lines, for the
+                                                   # privacy sweep at the end of the run
     # A second stub stands in for OpenRouter. Same protocol, so the OpenRouter route is
     # exercised for real: if the server sends a swap to the wrong place, this one never
     # hears about it and the checks below fail.
@@ -279,7 +324,7 @@ def main():
         check("sk-stub" not in body, "/health never echoes the key itself")
 
         # everything outside viewer/ must be unreachable
-        print("\n[3/11] the server serves only viewer/")
+        print("\n[3/12] the server serves only viewer/")
         for path in ["/../config.json", "/%2e%2e/config.json", "/../server.py", "/../build.py",
                      "/..%2fconfig.json", "/../.git/config"]:
             status, _, body = request(base + path)
@@ -311,7 +356,7 @@ def main():
               "HEAD / works (proxies and previews need it)")
 
         # ----------------------------------------------------------------- brain
-        print("\n[4/11] the brain, with a stubbed OpenAI")
+        print("\n[4/12] the brain, with a stubbed OpenAI")
         status, _, body = request(base + "/chat")
         check(status == 405, "GET /chat is a clean 405, not a crash (got %s)" % status)
         status, _, body = request(base + "/chat", method="POST", payload=None)
@@ -387,7 +432,7 @@ def main():
         check(proc.poll() is None, "the server is still alive after all of that")
 
         # ------------------------------------------------------------ provenance
-        print("\n[5/11] provenance: does the server know when a question was about the notes?")
+        print("\n[5/12] provenance: does the server know when a question was about the notes?")
         def ask_prov(q):
             st, _, bd = request(base + "/chat", method="POST", payload={"question": q})
             try:
@@ -440,7 +485,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------------- the persona, and the greeting he opens with
-        print("\n[6/11] the persona and the boot greeting")
+        print("\n[6/12] the persona and the boot greeting")
         sys.path.insert(0, ROOT)
         import server as alfred_server
         src = open(os.path.join(ROOT, "server.py")).read()
@@ -514,7 +559,7 @@ def main():
 
         # ------------------------------------------------- placeholder-key path
         # ------------------------------------------------- growing the brain by voice
-        print("\n[7/11] growing the brain by voice")
+        print("\n[7/12] growing the brain by voice")
         # A throwaway copy of the real vault AND of the real viewer/graph-data.js, so
         # the ordering rules under test are the ones this project actually runs with -
         # and no test ever writes into the repo's own notes folder.
@@ -836,7 +881,7 @@ def main():
               and alfred_server.is_capture("Remember that x"),
               "only a leading 'remember' makes something a note rather than a question")
 
-        print("\n[8/11] placeholder key")
+        print("\n[8/12] placeholder key")
         ph_dir = tempfile.mkdtemp(prefix="alfred-ph-")
         ph_cfg = os.path.join(ph_dir, "config.json")
         ph_port = free_port()
@@ -893,7 +938,7 @@ def main():
             proc2.kill()
 
         # ----------------------------------------------------------------- sight
-        print("\n[9/11] sight: POST /see, one frame taken at the moment you ask")
+        print("\n[9/12] sight: POST /see, one frame taken at the moment you ask")
         # -- the viewer's half of the contract, read straight out of the file
         page = open(os.path.join(ROOT, "viewer", "index.html"), encoding="utf-8").read()
         tight = "".join(page.split())
@@ -1161,8 +1206,529 @@ def main():
             except subprocess.TimeoutExpired:
                 dproc.kill()
 
+        # ------------------------------------------------------------------ focus
+        print("\n[11/12] focus sessions: the lock, the drift, the report, and no identities")
+
+        # The service on its own, with a synthetic clock: this is where the arithmetic of
+        # grace, tiers, refunds and the ledger can be pinned down exactly. The live loop
+        # below is the same code against real ticks and a real HTTP client.
+        import focus as F
+
+        def from_pool(text, pool):
+            """Is this line one of the pool's, with the {off} slot filled in?
+
+            Tier 2 and tier 3 lines carry the time off target, so identity with the template
+            is the wrong question and matching it is the right one.
+            """
+            for template in pool:
+                pattern = re.escape(template).replace(re.escape("{off}"), ".+")
+                if re.fullmatch(pattern, text):
+                    return True
+            return False
+
+        def said_since(service, now, marker):
+            """The callouts NEWER than the marker, the way a page's poll sees them.
+
+            public_state() returns a window (callouts no older than CALLOUT_REPLAY_S), not
+            a delta, so "nothing was said" has to be asked with a marker - which is exactly
+            what the viewer does with ?since=.
+            """
+            state = service.public_state(since=marker, now=now)
+            return state["speak"], state["since"]
+
+        workdir = tempfile.mkdtemp(prefix="alfred-focus-")
+        scripted = ScriptedReader(workdir)
+        reader = F.Reader(command=[scripted.script], home_hosts=F.HOME_HOSTS)
+        ledger_path = os.path.join(workdir, "focus-ledger.json")
+        service = F.FocusService(reader, ledger_path=ledger_path, log=lambda m: LOG.append(m))
+
+        # -- what a person says becomes an action. Anchored: a question stays a question.
+        check(F.parse_focus("thirty minutes on this")["code"] == "focus_start",
+              "\"thirty minutes on this\" starts a session")
+        check(F.parse_focus("thirty minutes on this")["minutes"] == 30,
+              "and it is thirty minutes, not three")
+        check(F.parse_focus("extend by ten minutes")["code"] == "focus_extend",
+              "\"extend by ten minutes\" extends it")
+        check(F.parse_focus("give me fifteen seconds")["code"] == "focus_snooze",
+              "\"give me fifteen seconds\" snoozes")
+        check(F.parse_focus("call me out every thirty seconds")["code"] == "focus_nag",
+              "\"call me out every thirty seconds\" sets the nag cadence")
+        check(F.parse_focus("it's okay, I'm doing research")["code"] == "focus_excuse",
+              "\"it's okay, I'm doing research\" is an excuse")
+        check(F.parse_focus("end the session")["code"] == "focus_end",
+              "\"end the session\" ends it")
+        for question in ("what did my notes say about the budget?",
+                         "how many minutes was the meeting?",
+                         "can you focus on the budget note?",
+                         "did I write anything about work?"):
+            check(F.parse_focus(question)["code"] == "focus_none",
+                  "a question stays a question: %r" % question)
+
+        # -- the label rule for the session's own state: NOTHING but booleans, counters
+        #    and enum words may leave. This is the privacy promise, as a test.
+        idle = service.public_state()
+        check(set(idle) <= F.PUBLIC_FIELDS, "the public state is a whitelist (%d fields)" % len(idle))
+        check(all(k in F.PUBLIC_STRINGS for k in ("idle", idle["phase"], idle["reason"],
+                                                  idle["reader"], idle["reader_why"])),
+              "and every word in it is from the allowed vocabulary")
+
+        # -- a lock on the app AND the host, taken with a fresh query
+        start = service.start(30, now=1000.0)
+        check(start["ok"] and start["code"] == "focus_started",
+              "a session starts against the scripted reader: %s" % start["code"])
+        check(service.public_state(now=1000.0)["tab_locked"] is True,
+              "the lock includes the SITE when the app is a browser, not just the app")
+        check(service.public_state(now=1000.0)["on_target"] is True, "and it starts on target")
+
+        # -- a path change in the same host is never a drift: the SPA case, which is the
+        #    whole reason the lock is a host and not a URL
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42?page=9#anchor")
+        service.tick_once(now=1001.0)
+        service.tick_once(now=1002.0)
+        after_click = service.public_state(now=1002.0)
+        check(after_click["drifts"] == 0 and after_click["on_target"] is True,
+              "clicking deeper into the same site is not a drift (path and query ignored)")
+
+        # -- grace: a flick that is back before GRACE_MS never becomes a drift
+        scripted.write("com.google.Chrome", "https://news.example.com/top")
+        service.tick_once(now=1002.1)                     # 0.1s away
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+        service.tick_once(now=1002.4)                     # back at 0.3s: under the grace
+        grace_state = service.public_state(now=1002.4)
+        check(grace_state["drifts"] == 0,
+              "a %.0fms flick is not a drift at all (grace is %dms)"
+              % (300, F.GRACE_MS))
+        check(grace_state["ignores"] == 1, "it is counted as an ignore instead: %d"
+              % grace_state["ignores"])
+
+        # -- a real drift: the callout, in the first tier, and it escalates.
+        #    The tick is one second apart in the field, so a drift is counted on the first
+        #    tick that finds it older than the grace. This test walks the clock in 2s steps
+        #    (< TICK_GAP_MAX_S) and measures what actually happens, rather than assuming.
+        scripted.write("com.google.Chrome", "https://news.example.com/top")
+        service.tick_once(now=1003.4)
+        drifted = service.public_state(now=1003.4)
+        check(drifted["drifting"] is True and drifted["tier"] == 1,
+              "a switch to another SITE is a drift, tier 1")
+        check(drifted["reason"] == "tab", "and it says WHICH KIND: %s" % drifted["reason"])
+        check(drifted["timings"]["detect_ms"] >= F.GRACE_MS,
+              "the drift was older than the grace before it was counted (%dms > %dms)"
+              % (drifted["timings"]["detect_ms"], F.GRACE_MS))
+        check(len(drifted["speak"]) == 1, "and he says something the moment it is counted")
+        check(from_pool(drifted["speak"][0]["text"], F.CALLOUT_TIERS[1]),
+              "the tier 1 line is from the tier 1 pool: %r" % drifted["speak"][0]["text"])
+        check(service.reader.runs >= 1,
+              "the reader was launched, not consulted from a cache: %d run(s)" % service.reader.runs)
+
+        # -- the nag cadence, by voice: a second callout only when it is due
+        marker = drifted["since"]
+        service.set_nag(10)
+        t, spoken = 1003.4, []
+        while not spoken and t < 1040.0:
+            t += 2.0
+            service.tick_once(now=t)
+            spoken, marker = said_since(service, t, marker)
+        check(bool(spoken), "a second callout comes at the cadence he was asked for")
+        check(service.timings["nag_gap_ms"] >= 10000,
+              "and the gap between callouts is measured, not assumed: %dms"
+              % service.timings["nag_gap_ms"])
+        check(spoken and spoken[0]["tier"] == 1, "still tier 1: the excursion is young")
+
+        # -- the tiers, by how long ONE excursion has lasted
+        drift_started = 1002.4
+        first_seen = {}
+        # bounded by the planned half hour: walk past it and the session closes itself,
+        # which is a different test (and the next one) rather than a missing callout
+        while t < 1092.0 and 3 not in first_seen:
+            t += 2.0
+            service.tick_once(now=t)
+            state = service.public_state(now=t)
+            if state["tier"]:
+                first_seen.setdefault(state["tier"], t)
+        check(2 in first_seen and first_seen[2] - drift_started >= F.TIER_2_AFTER_S,
+              "tier 2 arrives once the excursion really is %.0fs old (at %.0fs)"
+              % (F.TIER_2_AFTER_S, first_seen.get(2, -1) - drift_started))
+        check(3 in first_seen and first_seen[3] - drift_started >= F.TIER_3_AFTER_S,
+              "and tier 3 once it is %.0fs old (at %.0fs)"
+              % (F.TIER_3_AFTER_S, first_seen.get(3, -1) - drift_started))
+        spoken, marker = said_since(service, t, marker)
+        check(bool(spoken) and from_pool(spoken[-1]["text"], F.CALLOUT_TIERS[3]),
+              "with a line taken from the tier 3 pool: %r"
+              % (spoken[-1]["text"] if spoken else None))
+
+        # -- the snooze buys quiet, not forgiveness
+        service.snooze(15, now=t)
+        t += 2.0
+        service.tick_once(now=t)
+        spoken, marker = said_since(service, t, marker)
+        check(not spoken, "a snoozed session is not nagged")
+        check(service.public_state(now=t)["snoozed"] is True, "and the state says it is snoozed")
+        check(service.public_state(now=t)["drifting"] is True,
+              "while still counting the drift underneath")
+
+        # -- the excuse refunds the excursion and stays quiet until you are back
+        excused = service.excuse()
+        check(excused["ok"] and excused["code"].startswith("focus_excused"),
+              "the excuse is accepted: %s" % excused["code"])
+        state = service.public_state(now=t)
+        check(state["drifting"] is False and state["excused"] is True,
+              "the excursion is struck from the record")
+        check(state["drifts"] == 0 and state["refunds"] == 1,
+              "the drift is refunded, not merely forgiven: drifts=%d refunds=%d"
+              % (state["drifts"], state["refunds"]))
+        check(state["refunded_s"] >= 60, "for the whole excursion: %.0fs back"
+              % state["refunded_s"])
+        t += 2.0
+        service.tick_once(now=t)
+        spoken, marker = said_since(service, t, marker)
+        check(not spoken, "and he holds his tongue while it is excused")
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+        t += 2.0
+        service.tick_once(now=t)
+        quiet_over = service.public_state(now=t)
+        check(quiet_over["excused"] is False, "the quiet ends the moment you are back")
+        check(quiet_over["refunds"] == 1 and quiet_over["clean_pct"] >= 90,
+              "a refunded excursion does not count against the percentage (%d%% clean)"
+              % quiet_over["clean_pct"])
+
+        # -- home base: his own tab is never a drift
+        scripted.write("com.google.Chrome", "http://127.0.0.1:4700/")
+        t += 2.0
+        service.tick_once(now=t)
+        home = service.public_state(now=t)
+        check(home["on_target"] is True and home["reason"] == "home",
+              "coming back to talk to him is home base, not a drift")
+        check(home["drifts"] == 0, "and it never became one")
+
+        # -- the fresh query, every tick: the count must track the ticks, not lag them
+        runs_before = service.reader.runs
+        ticks_before = service.timings["ticks"]
+        for i in range(5):
+            service.tick_once(now=t + 1.0 + i)
+        t = t + 5.0
+        ran = service.reader.runs - runs_before
+        check(ran == 5, "FIVE ticks launched FIVE fresh queries (%d): never a cache" % ran)
+        check(service.timings["ticks"] - ticks_before == 5, "and five ticks were accounted for")
+
+        # -- a reader that dies: he says he cannot see, and counts nothing
+        marker = service.public_state(now=t)["since"]
+        scripted.break_it("fail")
+        for i in range(F.READER_FAIL_PATIENCE + 1):
+            service.tick_once(now=t + 1.0 + i)
+        t += 4.0
+        blind = service.public_state(now=t)
+        check(blind["reader"] == "blind", "a dead reader is reported as blind, not as on target")
+        spoken, marker = said_since(service, t, marker)
+        check(any("lost sight" in c["text"] for c in spoken),
+              "and he says so out loud instead of guessing")
+        off_before = service.session["off_s"] + service.session["off_open_s"]
+        on_before = service.session["on_s"]
+        service.tick_once(now=t + 2.0)
+        t += 2.0
+        check(abs((service.session["off_s"] + service.session["off_open_s"]) - off_before) < 1e-6
+              and abs(service.session["on_s"] - on_before) < 1e-6,
+              "NO TIME IS COUNTED EITHER WAY WHILE HE CANNOT SEE (the clock is stopped)")
+        check(service.public_state(now=t)["drifts"] == 0, "and no drift is invented")
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+        service.tick_once(now=t + 2.0)
+        t += 2.0
+        check(service.public_state(now=t)["reader"] == "live",
+              "and he says when he can see again")
+        spoken, marker = said_since(service, t, marker)
+        check(any("see the front app again" in c["text"] for c in spoken),
+              "out loud, so a stopped clock cannot be mistaken for a quiet one")
+
+        # -- the report card and the ledger
+        report = service.finish("end")
+        text = report["answer"]
+        check(report["ok"] and report["code"] == "focus_ended", "the session ends")
+        check("on target" in text and "percent clean" in text and "drift" in text,
+              "the report card has the minutes, the percentage and the drifts: %r" % text[:110])
+        check("streak" in text.lower() or "nothing" in text, "and it accounts for the streak")
+        ledger = json.load(open(ledger_path))
+        check(set(ledger) == set(F.LEDGER_FIELDS),
+              "the ledger holds exactly its whitelist and nothing else: %s" % sorted(ledger))
+        check(all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in ledger.values()),
+              "every value in it is a number")
+        check(ledger["sessions"] == 1 and ledger["refunds"] == 1 and ledger["drifts"] == 0,
+              "the session was counted with its refund and no drift: sessions=%d drifts=%d refunds=%d"
+              % (ledger["sessions"], ledger["drifts"], ledger["refunds"]))
+
+        # -- the 85 percent rule, and the streak that grows with it. A fresh ledger, so the
+        #    arithmetic is the assertion rather than a coincidence of earlier sessions.
+        streak_path = os.path.join(workdir, "streak-ledger.json")
+        clean_reader = F.Reader(command=[scripted.script], home_hosts=F.HOME_HOSTS)
+        clean_service = F.FocusService(clean_reader, ledger_path=streak_path)
+        started = clean_service.start(30, now=2000.0)
+        check(started["ok"], "a clean session starts")
+        for i in range(1, 61):
+            clean_service.tick_once(now=2000.0 + i)
+        clean_report = clean_service.finish("end")
+        check(clean_report["report"]["pct"] >= 85 and clean_report["report"]["clean"] is True,
+              "a session spent entirely on target is CLEAN (%d%%)" % clean_report["report"]["pct"])
+        check(clean_report["report"]["streak"] == 1, "and it starts the streak at one")
+        check(json.load(open(streak_path))["streak"] == 1, "the streak is in the ledger")
+
+        # a second clean one grows it
+        clean2 = F.FocusService(F.Reader(command=[scripted.script], home_hosts=F.HOME_HOSTS),
+                                ledger_path=streak_path)
+        clean2.start(30, now=2100.0)
+        for i in range(1, 31):
+            clean2.tick_once(now=2100.0 + i)
+        check(clean2.finish("end")["report"]["streak"] == 2, "a second clean session grows it to two")
+
+        # -- a dirty session breaks the streak, and says so
+        dirty_reader = F.Reader(command=[scripted.script], home_hosts=F.HOME_HOSTS)
+        dirty_service = F.FocusService(dirty_reader, ledger_path=streak_path)
+        check(dirty_service.start(30, now=3000.0)["ok"],
+              "the dirty session starts (a session shorter than the excursion it contains "
+              "would read as clean, which is a different test)")
+        scripted.write("com.google.Chrome", "https://news.example.com/top")
+        for i in range(1, 31):
+            dirty_service.tick_once(now=3000.0 + i)
+        dirty_report = dirty_service.finish("end")
+        check(dirty_report["report"]["clean"] is False,
+              "a session spent elsewhere is not clean (%d%%)" % dirty_report["report"]["pct"])
+        check(dirty_report["report"]["streak"] == 0 and "back to nothing" in dirty_report["answer"],
+              "and the streak goes back to nothing, out loud")
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+
+        # -- a two-second poke is not a session: it does not touch the ledger at all
+        poke_reader = F.Reader(command=[scripted.script], home_hosts=F.HOME_HOSTS)
+        poke_service = F.FocusService(poke_reader, ledger_path=streak_path)
+        before = json.load(open(streak_path))
+        poke_service.start(30, now=4000.0)
+        poke_service.tick_once(now=4001.0)
+        poke_service.tick_once(now=4002.0)
+        poke = poke_service.finish("abort")
+        check(poke["report"]["counted"] is False and "poke, not a session" in poke["answer"],
+              "a two-second session says so instead of reporting a percentage")
+        check(json.load(open(streak_path)) == before,
+              "and it does not go in the ledger: no streak was risked")
+
+        # -- and the identity sweep, at the level where it has to hold
+        secrets = ["com.tinyspeck.slackmacgap", "work.example.com", "news.example.com",
+                   "board/42"]
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+        sweep_reader = F.Reader(command=[scripted.script], home_hosts=F.HOME_HOSTS)
+        sweep_service = F.FocusService(sweep_reader, ledger_path=os.path.join(workdir, "sweep.json"))
+        sweep_service.start(30, now=5000.0)
+        scripted.write("com.google.Chrome", "https://news.example.com/top")
+        for i in range(1, 8):
+            sweep_service.tick_once(now=5000.0 + i)
+        sweep_state = sweep_service.public_state(now=5008.0)
+        blob = json.dumps(sweep_state)
+        leaked = [s for s in secrets if s in blob]
+        check(not leaked, "NO IDENTITY IN THE STATE the client sees" +
+              (" (leaked: %s)" % leaked if leaked else ""))
+        check(sweep_state["drifting"] is True and sweep_state["reason"] == "tab",
+              "and the state is still USEFUL without them: drifting, %s" % sweep_state["reason"])
+        sweep_service.finish("end")
+        blob = json.dumps(sweep_service.public_state(now=5010.0))
+        check(not [s for s in secrets if s in blob], "nor after the session ends")
+        check(not [s for s in secrets if s in open(streak_path).read()],
+              "nor in the ledger on disk")
+        check(not [s for s in secrets if s in json.dumps(sweep_service.timings)],
+              "nor in the timings")
+
+        try:
+            original = F.FOCUS_REPORT_LINE
+            F.FOCUS_REPORT_LINE = original + " {app}"
+            F.check_line_templates()
+            F.FOCUS_REPORT_LINE = original
+            bad("a template with an app field was accepted")
+            fail += 1
+        except F.LineFieldError:
+            F.FOCUS_REPORT_LINE = original
+            check(True, "a line template with an app field is REFUSED by check_line_templates()")
+
+        # -- the live loop, over HTTP, against a real server on a real tick
+        focus_port = free_port()
+        live_cfg = os.path.join(workdir, "live-config.json")
+        with open(live_cfg, "w") as fh:
+            json.dump({"openai_api_key": "sk-stub-key-for-verification", "model": "gpt-6-astra"}, fh)
+        live_front = os.path.join(workdir, "front.txt")
+        scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+        live_ledger = os.path.join(workdir, "live-ledger.json")
+        lproc, _lbanner = start_server(focus_port, live_cfg, [
+            "--focus-reader", scripted.script,
+            "--focus-ledger", live_ledger,
+            "--focus-home-host", "127.0.0.1",
+            "--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port])
+        lbase = "http://127.0.0.1:%d" % focus_port
+        try:
+            status, _, body = request(lbase + "/focus")
+            live_idle = json.loads(body) if status == 200 else {}
+            check(status == 200 and live_idle.get("phase") == "idle",
+                  "GET /focus answers while nothing is running: %s" % live_idle.get("phase"))
+
+            status, _, body = request(lbase + "/focus", method="POST",
+                                      payload={"text": "thirty minutes on this"})
+            started = json.loads(body) if status == 200 else {}
+            check(started.get("ok") and started.get("code") == "focus_started",
+                  "the live server takes a session from voice: %s" % started.get("code"))
+            check(started.get("focus", {}).get("remaining_s") == 1800,
+                  "thirty minutes on the clock: %s" % started.get("focus", {}).get("remaining_s"))
+            check(started.get("focus", {}).get("tab_locked") is True,
+                  "locked to the app AND the site")
+
+            # the tick really runs, on the server, with no browser involved
+            time.sleep(2.5)
+            status, _, body = request(lbase + "/focus")
+            ticking = json.loads(body)
+            check(ticking["timings"]["ticks"] >= 2,
+                  "the server ticks on its own: %d ticks without a page open"
+                  % ticking["timings"]["ticks"])
+            check(ticking["timings"]["reader_runs"] >= ticking["timings"]["ticks"],
+                  "and every tick launched its own fresh query (%d run(s) for %d tick(s))"
+                  % (ticking["timings"]["reader_runs"], ticking["timings"]["ticks"]))
+
+            # a drift, and the callout, on the live loop
+            scripted.write("com.google.Chrome", "https://news.example.com/top")
+            deadline = time.time() + 4.0
+            callout_at = None
+            while time.time() < deadline:
+                status, _, body = request(lbase + "/focus")
+                state = json.loads(body)
+                if state.get("speak"):
+                    callout_at = state["timings"]["callout_ms"]
+                    live_drift = state
+                    break
+                time.sleep(0.15)
+            check(callout_at is not None,
+                  "a real switch to another site produced a callout inside four seconds")
+            if callout_at is not None:
+                check(live_drift["drifting"] and live_drift["tier"] == 1,
+                      "with the state to match: drifting, tier %s" % live_drift["tier"])
+                check(live_drift["timings"]["detect_ms"] >= F.GRACE_MS,
+                      "and the drift was older than the grace before he said a word (%dms)"
+                      % live_drift["timings"]["detect_ms"])
+                check(live_drift["timings"]["tick_lag_max_ms"] < 1000,
+                      "the tick is not lagging behind its own second: %dms worst"
+                      % live_drift["timings"]["tick_lag_max_ms"])
+
+            status, _, body = request(lbase + "/focus", method="POST",
+                                      payload={"text": "give me fifteen seconds"})
+            snoozed = json.loads(body)
+            check(snoozed.get("code") == "focus_snoozed" and snoozed["focus"]["snoozed"] is True,
+                  "and the snooze works over HTTP")
+
+            live_blob = json.dumps(snoozed)
+            check(not [s for s in secrets if s in live_blob],
+                  "the live response carries no app and no host either")
+
+            status, _, body = request(lbase + "/focus", method="POST",
+                                      payload={"text": "end the session"})
+            ended = json.loads(body)
+            check(ended.get("ok") and ended.get("report", {}).get("seconds") >= 3,
+                  "ending it over HTTP gives the report card: %r" % ended.get("answer", "")[:90])
+            check("poke, not a session" in ended.get("answer", "")
+                  and ended["report"]["counted"] is False,
+                  "and a three-second session is called a poke: nothing counted, no streak risked")
+            check(not os.path.exists(live_ledger),
+                  "so the ledger is not written at all: a poke never touches the record")
+
+            # a reload rejoins: the session is the server's, so a second tab sees it
+            status, _, body = request(lbase + "/focus", method="POST",
+                                      payload={"text": "twenty minutes on this"})
+            check(json.loads(body).get("code") == "focus_started", "a second session starts")
+            status, _, body = request(lbase + "/focus")
+            from_another_tab = json.loads(body)
+            check(from_another_tab["phase"] == "running" and from_another_tab["remaining_s"] > 1100,
+                  "and a brand-new client sees it immediately: %.0fs left"
+                  % from_another_tab["remaining_s"])
+            status, _, body = request(lbase + "/focus", method="POST", payload={"text": "pause"})
+            check(json.loads(body).get("code") == "focus_paused", "pause works")
+            paused_a = json.loads(request(lbase + "/focus")[2])
+            time.sleep(1.6)
+            paused_b = json.loads(request(lbase + "/focus")[2])
+            check(abs(paused_b["elapsed_s"] - paused_a["elapsed_s"]) < 0.5,
+                  "and a paused session does not burn the clock while it sits there")
+            status, _, body = request(lbase + "/focus", method="POST", payload={"text": "resume"})
+            check(json.loads(body).get("code") == "focus_resumed", "resume works")
+            time.sleep(1.4)
+            check(json.loads(request(lbase + "/focus")[2])["elapsed_s"] > paused_b["elapsed_s"],
+                  "and the clock runs again")
+            status, _, body = request(lbase + "/focus", method="POST",
+                                      payload={"text": "call me out every twelve seconds"})
+            check(json.loads(body).get("code") == "focus_nag"
+                  and json.loads(body)["focus"]["nag_s"] == 12,
+                  "the nag cadence is settable over HTTP: %s"
+                  % json.loads(body).get("focus", {}).get("nag_s"))
+
+            status, _, body = request(lbase + "/focus", method="POST",
+                                      payload={"text": "what did my notes say about the budget?"})
+            check(status == 400 and "not a focus command" in body,
+                  "a question sent to /focus is refused rather than acted on")
+            status, _, body = request(lbase + "/focus", method="POST", payload={})
+            check(status == 400 and "No focus action" in body, "an empty POST /focus is a 400")
+            status, _, body = request(lbase + "/focus", method="POST", payload={"action": "dance"})
+            check(status == 400 and "Unknown focus action" in body, "and so is an unknown action")
+            status, _, body = request(lbase + "/focus", method="GET")
+            check(status == 200, "GET /focus is the state")
+
+            # a server with no reader at all says so instead of pretending to watch
+            blind_port = free_port()
+            bproc, _bbanner = start_server(blind_port, live_cfg,
+                                           ["--focus-reader", "",
+                                            "--focus-ledger", os.path.join(workdir, "blind.json"),
+                                            "--openai-base-url", "http://127.0.0.1:%d/v1" % stub_port])
+            try:
+                status, _, body = request("http://127.0.0.1:%d/health" % blind_port)
+                blind_health = json.loads(body)
+                check(blind_health["focus"]["can_see"] is False,
+                      "/health reports that it cannot see the front app on this machine")
+                status, _, body = request("http://127.0.0.1:%d/focus" % blind_port,
+                                          method="POST", payload={"text": "thirty minutes on this"})
+                refused = json.loads(body)
+                check(status == 200 and refused.get("ok") is False
+                      and refused.get("code") == "focus_blind",
+                      "and a session is REFUSED rather than faked: %s" % refused.get("code"))
+                check("--focus-reader" in refused.get("answer", ""),
+                      "and he says how to give him eyes: %r" % refused.get("answer", "")[:90])
+            finally:
+                bproc.terminate()
+                try:
+                    bproc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    bproc.kill()
+
+            # and the reader can die mid-session without the server falling over
+            scripted.break_it("fail")
+            time.sleep(1.5)
+            status, _, body = request(lbase + "/focus")
+            check(status == 200, "a reader that dies does not take the server with it")
+            status, _, body = request(lbase + "/focus", method="POST", payload={"text": "abort"})
+            check(json.loads(body).get("ok") is True, "and the session can still be ended")
+            scripted.write("com.google.Chrome", "https://work.example.com/board/42")
+
+            status, _, body = request(lbase + "/health")
+            health_focus = json.loads(body)["focus"]
+            check(set(health_focus) == {"phase", "can_see", "reader", "ledger", "tick_s",
+                                        "grace_ms", "nag_s", "sessions", "clean_sessions",
+                                        "streak", "best_streak"},
+                  "/health carries the focus knobs and the ledger totals, and nothing else: %s"
+                  % sorted(health_focus))
+            check(health_focus["grace_ms"] == F.GRACE_MS and health_focus["tick_s"] == F.TICK_S,
+                  "the knobs a person would tune are visible from outside")
+            kinds = {k: type(v).__name__ for k, v in health_focus.items()}
+            check(all(isinstance(v, (bool, int, float)) or v in F.PUBLIC_STRINGS
+                      for v in health_focus.values()),
+                  "and every value in it is a boolean, a counter or an enum word: %s" % kinds)
+        finally:
+            lproc.terminate()
+            try:
+                lproc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                lproc.kill()
+
+        # nothing in this section may leak into the server's own log either
+        log_blob = "\n".join(LOG)
+        check(not [s for s in secrets if s in log_blob],
+              "the server log carries no app and no host (it logs 'tier 2 at 21.0s off target')")
+
         # ------------------------------------------------------------------ brain
-        print("\n[10/11] changing the brain by voice, and refusing near-misses")
+        print("\n[10/12] changing the brain by voice, and refusing near-misses")
         import server as alfred_server
 
         # the lines and the catalogue are character, so they live in the persona block
@@ -1428,7 +1994,7 @@ def main():
         or_stub.shutdown()
 
     # ------------------------------------------------------------------ report
-    print("\n[11/11] summary")
+    print("\n[12/12] summary")
     fails = [m for state, m in results if state == "FAIL"]
     print("  %d checks, %d passed, %d failed" % (len(results), len(results) - len(fails), len(fails)))
     if fails:

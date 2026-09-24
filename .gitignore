@@ -11,6 +11,9 @@ venv/
 *.log
 .DS_Store
 
+# focus sessions: aggregates only, and it is your record, not the repo's
+focus-ledger.json
+
 # optional offline copies of the CDN files (python3 tools/vendor.py)
 viewer/vendor/
 

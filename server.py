@@ -9,6 +9,10 @@ server.py - serves the viewer and gives the galaxy a brain.
     notes/captures/, indexes it immediately and reports where to put the new star
   * POST /see : a question plus ONE frame of the user's screen, captured by the
     browser at the moment he asked, answered from the picture by the same model
+  * GET  /focus : the focus session, as a whitelist of booleans and counters - never an
+    app or a tab, which are compared and discarded inside the reader
+  * POST /focus : start a session ("thirty minutes on this"), pause, resume, extend,
+    snooze, excuse, set the nag cadence, or end it and hear the report card
   * POST /model : change which model he is wearing, by name - "switch to Astra",
     "try on Claude Fable 5.1", "go back to your normal brain". Runtime only: a restart
     always goes back to the model in config.json. A name that is not exactly one of the
@@ -38,6 +42,8 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import focus                      # the focus sessions: the tick, the reader, the ledger
 from collections import Counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1292,6 +1298,16 @@ class State:
         # back on the model in config.json and no one can strand themselves on a brain
         # they did not mean to keep.
         self.model_override = None
+        # FOCUS. The session lives here, on a one-second tick, so a reloaded tab rejoins
+        # it and the countdown never dies with a browser. The reader is the only thing in
+        # this process that ever holds an app or a host, and it holds them as hashes.
+        home_hosts = list(focus.HOME_HOSTS) + list(args.focus_home_host or [])
+        if args.host not in ("0.0.0.0", "", None):
+            home_hosts.append(args.host)
+        self.focus = focus.FocusService(
+            focus.Reader(command=args.focus_reader, home_hosts=home_hosts),
+            ledger_path=args.focus_ledger or os.path.join(HERE, focus.LEDGER_PATH),
+            log=lambda msg: sys.stderr.write("  %s  %s\n" % (time.strftime("%H:%M:%S"), msg)))
         self.lock = threading.Lock()
         self.started = time.time()
         self.questions = 0
@@ -1416,6 +1432,24 @@ class State:
                 "max_edge": SEE_MAX_EDGE,
                 "min_bytes": SEE_MIN_IMAGE_BYTES,
             },
+            # Focus: the knobs, the ledger totals, and whether he can SEE - never a state
+            # with an app or a tab in it. public_state() is a whitelist and this block is
+            # built from named constants here, so the same rule holds on both paths.
+            "focus": {
+                "phase": self.focus.public_state()["phase"],
+                "can_see": bool(self.focus.reader.command) and self.focus.reader.platform_ok,
+                "reader": "command" if self.focus.reader.command else "none",
+                # booleans, counters and enum words only - the same rule as the state the
+                # page polls, so a path can never answer a question about what you were doing
+                "ledger": bool(self.focus.ledger_path),
+                "tick_s": self.focus.tick_s,
+                "grace_ms": focus.GRACE_MS,
+                "nag_s": self.focus.nag_s,
+                "sessions": int(self.focus.ledger["sessions"]),
+                "clean_sessions": int(self.focus.ledger["clean_sessions"]),
+                "streak": int(self.focus.ledger["streak"]),
+                "best_streak": int(self.focus.ledger["best_streak"]),
+            },
             "uptime_s": round(time.time() - self.started, 1),
             "root": self.root,
         }
@@ -1530,6 +1564,13 @@ class Handler(BaseHTTPRequestHandler):
             if query.get("hour", [""])[0].isdigit():
                 hour = int(query["hour"][0]) % 24
             return self._json(HTTPStatus.OK, self.state.health(hour), head_only)
+        if path == "/focus":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                since = int((query.get("since", ["0"])[0] or 0))
+            except ValueError:
+                since = 0
+            return self._focus(since)
         if path == "/chat":
             return self._error(HTTPStatus.METHOD_NOT_ALLOWED,
                                "GET /chat is not supported - POST a JSON body with your question.",
@@ -1564,9 +1605,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._see()
         if path == "/model":
             return self._model()
+        if path == "/focus":
+            return self._focus_command()
         self._error(HTTPStatus.NOT_FOUND, "No such endpoint: %s" % path,
-                    "Only POST /chat, POST /remember, POST /see and POST /model exist on "
-                    "this server.")
+                    "Only POST /chat, POST /remember, POST /see, POST /model and POST "
+                    "/focus exist on this server.")
 
     def do_OPTIONS(self):
         self._send(HTTPStatus.NO_CONTENT, b"", extra={"Allow": "GET, HEAD, POST, OPTIONS"})
@@ -1623,6 +1666,70 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(HTTPStatus.OK, body, ctype, {"Cache-Control": cache}, head_only)
 
     # -- growing the brain -------------------------------------------------- #
+    def _focus(self, since=0):
+        """GET /focus - the state, and any callout the page has not spoken yet.
+
+        Everything here is built by focus.public_state(), which builds it from a whitelist
+        and refuses to hand out anything that is not on it.
+        """
+        return self._json(HTTPStatus.OK, self.state.focus.public_state(since))
+
+    def _focus_command(self):
+        """POST /focus - an action from a button, or the words you said."""
+        body, err = self._json_body()
+        if err:
+            return self._error(HTTPStatus.BAD_REQUEST, err,
+                               'Send {"action": "start", "minutes": 30} or '
+                               '{"text": "thirty minutes on this"}.')
+        action = body.get("action")
+        text = body.get("text") or body.get("said") or body.get("question")
+        if not action and not text:
+            return self._error(HTTPStatus.BAD_REQUEST, "No focus action was named.",
+                               'Send {"action": "start", "minutes": 30}, or {"text": '
+                               '"thirty minutes on this"}.')
+        try:
+            result = self.state.focus.handle(
+                action=action, text=text, minutes=body.get("minutes"),
+                seconds=body.get("seconds"), since=body.get("since") or 0)
+        except Exception as failure:                  # noqa: BLE001 - reported, not raised
+            return self._error(HTTPStatus.OK, "The session could not be changed: %s"
+                               % plain_error(failure))
+        if result.get("code") == "focus_not_command":
+            return self._error(HTTPStatus.BAD_REQUEST,
+                               "That is not a focus command.",
+                               'Try "thirty minutes on this", "pause", "resume", "extend by '
+                               'ten minutes", "give me fifteen seconds", "call me out every '
+                               'thirty seconds", "it\'s okay, I\'m doing research" or "end '
+                               'the session".')
+        if result.get("code") == "focus_unknown_action":
+            return self._error(HTTPStatus.BAD_REQUEST,
+                               result.get("error") or "Unknown focus action.",
+                               result.get("hint") or "start, pause, resume, extend, snooze, "
+                                                     "excuse, nag, end")
+        return self._json(HTTPStatus.OK, result)
+
+    def _json_body(self):
+        """Read and parse a JSON body. Returns (body, error_message)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None, "Bad Content-Length."
+        if length <= 0:
+            return {}, None
+        if length > SEE_MAX_BODY:
+            return None, "That body is too large."
+        try:
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+        except OSError:
+            return None, "The body could not be read."
+        if not raw.strip():
+            return {}, None
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return None, "That was not JSON."
+        return (body if isinstance(body, dict) else {}), None
+
     def _model(self):
         """POST /model - change which brain this process is wearing, or refuse.
 
@@ -2057,6 +2164,18 @@ def main(argv=None):
     ap.add_argument("--openrouter-base-url", default=None,
                     help="override the OpenRouter base URL (default: %s)" % OPENROUTER_BASE_URL)
     ap.add_argument("--no-create-config", action="store_true", help="never create config.json")
+    ap.add_argument("--focus-reader", default=None,
+                    help="the command that prints the frontmost app (and, on line 2, the "
+                         "active tab's URL) - FRESH EVERY TICK. Default: %s, which needs "
+                         "macOS. Point it at your own script anywhere else."
+                         % (focus.READER_COMMAND[0] if isinstance(focus.READER_COMMAND, (list, tuple))
+                            else focus.READER_COMMAND))
+    ap.add_argument("--focus-ledger", default=None,
+                    help="aggregates-only ledger for focus sessions (default: %s next to "
+                         "config.json)" % focus.LEDGER_PATH)
+    ap.add_argument("--focus-home-host", action="append", default=[],
+                    help="a host that counts as home base (his own tab), e.g. the name you "
+                         "reach the viewer on. Repeatable. localhost and 127.0.0.1 always do")
     args = ap.parse_args(argv)
 
     state = State(args)
@@ -2074,6 +2193,7 @@ def main(argv=None):
         print("           something else is already using that port:  server.py --port 4701", file=sys.stderr)
         return 2
     httpd.daemon_threads = True
+    state.focus.start_thread()
 
     ks = key_state(state.cfg.get("openai_api_key"))
     print("")
@@ -2086,7 +2206,21 @@ def main(argv=None):
     print("  api key     : %s  (%s)" % (ks, state.config_path))
     if ks != "set":
         print("                -> /chat answers with a clean 'paste your key' error until this is set")
-    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember  POST /see  POST /model")
+    focus_reader = state.focus.reader
+    can_see = bool(focus_reader.command) and focus_reader.platform_ok
+    print("  focus       : every %.1fs, grace %dms, callouts at 1/%.0f/%.0fs, nag %.0fs%s"
+          % (focus.TICK_S, focus.GRACE_MS, focus.TIER_2_AFTER_S, focus.TIER_3_AFTER_S,
+             state.focus.nag_s, "" if can_see else ""))
+    if can_see:
+        print("  front app   : fresh query every tick: %s"
+              % " ".join(focus_reader.command[:2]))
+    else:
+        print("  front app   : CANNOT SEE IT on this machine (%s)"
+              % ("no reader for this platform" if focus_reader.command else "no reader command"))
+        print("                -> a focus session will say so instead of pretending to watch;")
+        print("                   start with --focus-reader <script> (macOS needs none)")
+    print("  endpoints   : GET /  GET /health  POST /chat  POST /remember  POST /see  POST /model  "
+          "GET|POST /focus")
     print("  brains      : %s" % brain_families())
     if state.swapped:
         print("  swapped     : %s (until this process stops)" % brain_label(state.model))
@@ -2098,6 +2232,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\nserver.py: stopped.")
     finally:
+        state.focus.stop_thread()
         httpd.server_close()
     return 0
 

@@ -19,6 +19,12 @@ the status line always says which model is in the chair. A version that does not
 refused out loud, with the ones that do - it is never quietly rounded to the nearest match - and
 a restart always puts back the model in `config.json`.
 
+And it will keep you to your word: say **"thirty minutes on this"** and a card pins itself to
+the top-right and starts counting. It watches which app - and, in a browser, which site - is in
+front of you, says something dry when you wander off, accepts an excuse or a snooze when you have
+one, and reads you a report card at the end with your minutes on target, your drifts, and the
+streak of clean sessions those minutes are building.
+
 No npm. No build step. No framework. Python 3 standard library plus one CDN script.
 
 ---
@@ -552,6 +558,146 @@ The screenshots are `tools/screenshots/brain-switched.jpg` (the chip, *until res
 `brain-answering.jpg` (an answer from the swapped brain, with the real model id on the card)
 and `brain-refused.jpg` (a refusal, with the chip still where it was).
 
+## Watch where you actually are (focus sessions)
+
+Say **"thirty minutes on this"**, or press **FOCUS** in the ask bar, and a small card pins
+itself to the top-right of the desktop: the time left, how much of it you have actually spent
+where you said you would be, and how many times you have wandered. He watches, and he says
+something when you leave.
+
+| say this | what happens |
+| --- | --- |
+| **"thirty minutes on this"** (or a **FOCUS** click) | locks the app in front of you now - and, if it is a browser, the site open in it - and starts the clock |
+| **"call me out every thirty seconds"** | changes the nag cadence while one drift is running |
+| **"give me fifteen seconds"** | buys quiet - the drift is still counted, nothing is said |
+| **"it's okay, I'm doing research"** | excuses the current excursion: it is refunded, not merely forgiven, and he stays quiet until you are back |
+| **"pause" / "resume" / "extend by ten minutes" / "end the session"** | as it says |
+| a question | still a question. "what did my notes say about the budget?" is not a command to end anything |
+
+### The session lives on the server, not in the tab
+
+The clock is a thread in `server.py` on a **one-second tick**, and the page only ever *asks*
+it what the time is. Reload the tab, open a second one, close the browser and come back: the
+session is still running, with the same seconds burned. That is also why the card's countdown
+moves even in a tab that is not in front of you - and why a stale page can never talk him into
+an earlier time than the server keeps.
+
+### He locks the app, and the site - never the whole URL
+
+The lock is taken at the moment you start: the **bundle id** of the frontmost app, plus - when
+that app is a browser - a hash of the **host** of the active tab. Not the path, not the query,
+not the title. The work site this was built for is a single-page app whose path changes with
+every click, so site-level is the honest granularity: moving around *inside* the work counts as
+work, and a different site counts as leaving. The tab of the galaxy itself is **home base** -
+coming back to talk to him is never a drift.
+
+### A fresh query every tick, never a cached notification
+
+Every tick runs the reader again from scratch (on macOS, an `osascript` pair asking for the
+frontmost app and, if it is a browser, the active tab's URL). The tempting version of this
+feature subscribes to app-switch notifications and reads their payload - and in a server that
+lives for weeks, that is a trap: the notification API stops delivering, the last app you
+switched to is reported forever, and the timer silently measures nothing. A fresh query is
+slower and it keeps telling the truth.
+
+The reader is a command, and a command can be anything that prints its answer:
+
+```
+com.google.Chrome                     <- line 1: the frontmost app
+https://work.example.com/board/42     <- line 2: the active tab's URL (optional)
+```
+
+Blank output, a non-zero exit or a timeout is a **failed read**: not a drift, not on target -
+the clock stops, the card says `cannot see the front app`, and he says so out loud rather than
+guessing. `--focus-reader <script>` points the server at your own, which is exactly how the
+loop is verified on a machine that is not a Mac.
+
+### The privacy promise is structural, not a promise
+
+Your app and tab identities are compared and thrown away **inside the reader**. They never
+reach the page, the log, the ledger or the timings: what the page polls is a whitelist of
+booleans, counters and enum words (`drifting`, `reason: "tab"`, `tier: 2`, `off_s`, `drifts`,
+`clean_pct`) - never a name. The test that holds this up sweeps every on-screen surface for
+the identities the reader actually saw, and a template that carries an app field is refused at
+import (`check_line_templates()`). Adding a field to that state means adding it to the
+whitelist on purpose.
+
+### The grace, the tiers, and the nag
+
+A switch is not a drift instantly: you get **800ms** of grace, because clicking a link and
+landing on the next page should not be a sin. After that he speaks from a pool of canned
+lines that escalates over three tiers - quiet-but-pointed at first, honest at twenty seconds,
+and at a minute *"Shall I fetch the report card early, sir, or are we pretending?"*. While one
+drift keeps going, the nag cadence (30 seconds by default) repeats it, and the tier only ever
+escalates while the same excursion lasts.
+
+Two numbers make this honest rather than clever:
+
+* a drift is counted on the first tick that finds it **already older than the grace**, so a
+  callout lands between `TICK_S` and `TICK_S + GRACE_MS` - **1.0s to 1.8s** at the defaults,
+  depending on where in the second you wandered. A callout cannot be instantaneous, and a late
+  one is not automatically the grace's fault.
+* every knob is a named constant at the top of `focus.py` - `TICK_S`, `GRACE_MS`,
+  `TIER_2_AFTER_S`, `TIER_3_AFTER_S`, `NAG_S`, `SNOOZE_S`, `CLEAN_PCT`,
+  `LEDGER_MIN_SESSION_S`, `CALLOUT_REPLAY_S`, `REMEMBER_LAST_PLACE_S`, `TICK_GAP_MAX_S`.
+
+### Tune it from field numbers, not from memory
+
+If a callout feels late, print the timings before anyone touches `GRACE_MS`:
+
+```bash
+python3 tools/focus-timings.py           # against the server you have running
+```
+
+```
+  knobs        : tick 1.00s, grace 800ms, nag 30.0s
+  the band     : a callout lands between TICK_S and TICK_S + GRACE_MS = 1000..1800ms after a drift begins
+  the field    : detect 1630ms, callout 1630ms, nag gap 30999ms
+  the reader   : 26 run(s), 0 fail(s), 4ms avg, 14ms worst
+  the tick     : 24 tick(s) watched, 4ms avg, 14ms worst, lag 0ms last / 0ms worst
+  this window  : 25 sample(s) over 6.0s, 6 tick(s), 6 reader run(s)
+```
+
+Those are real numbers from a session run on this machine: the tick firing every 1.01s, the
+drift detected at 1630ms - **inside** the band, so the grace is not the problem - the reader
+taking 4ms on average, and no measurable tick lag. It also reads the other way: a reader
+slower than `GRACE_MS`, or a tick lag past a second, is printed as a warning, because a slow
+reader looks *exactly* like a slow grace and only one of those is a knob worth moving.
+
+### The report card, and the streak
+
+Ending a session - by voice, by the button, or by the clock running out - produces a spoken
+report: **minutes on target out of minutes planned, the percentage clean, the drifts, the
+refunds**, and where the streak stands. A session that is at least **85% clean** grows the
+streak; anything else puts it back to nothing, and he says so. The ledger keeps aggregates
+only - sessions, minutes on, minutes planned, drifts, refunds, the streak and the best streak
+- and never an app, a site or a sentence about your day. A session shorter than 30 seconds is
+called what it is (*"a poke, not a session"*) and is not written down at all.
+
+### Try it yourself
+
+```bash
+python3 server.py                    # on a Mac the front-app reader works out of the box
+python3 tools/focus-timings.py       # in another terminal, while a session runs
+```
+
+1. Say **"thirty minutes on this"** (or click **FOCUS**). The card appears: `30:00`, `on target`.
+2. Switch to another tab or another app. Within a couple of seconds the card tints, reads
+   `drifting`, and he says something. Switch back: `on target` again, and the wander is on the
+   tally.
+3. Say **"give me fifteen seconds"** and wander off again: the card reads `snoozed`, nothing is
+   said, and the time is still counted against you.
+4. Say **"it's okay, I'm doing research"**: the excursions stop counting and the card clears.
+5. Say **"end the session"** and listen to the report card.
+
+On anything that is not a Mac, or for a demo, point the server at a script of your own:
+
+```bash
+printf '#!/bin/sh\ncat /tmp/front.txt\n' > /tmp/reader.sh && chmod +x /tmp/reader.sh
+printf 'com.google.Chrome\nhttps://work.example.com/board/42\n' > /tmp/front.txt
+python3 server.py --focus-reader /tmp/reader.sh --focus-ledger /tmp/focus-ledger.json
+```
+
 ## Point it at your own notes
 
 By default it indexes `./notes`. Any folder of markdown works:
@@ -610,7 +756,8 @@ mock never does.
 | path | what it is |
 | --- | --- |
 | `build.py` | the indexer. Writes `viewer/graph-data.js` as `const GRAPH = {nodes, links}` |
-| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat`, `POST /remember`, `POST /see` and `POST /model` |
+| `server.py` | stdlib HTTP server on port 4700. Serves `viewer/` **only**, plus `GET /health`, `POST /chat`, `POST /remember`, `POST /see`, `POST /model` and `GET|POST /focus` |
+| `focus.py` | focus sessions: the reader, the one-second tick, the grace and the tiers, the report card and the aggregates-only ledger. Every knob is a named constant at the top |
 | `notes/captures/` | where "remember that ..." writes its notes - real markdown, indexed the moment they are written |
 | `viewer/index.html` | the whole viewer: 3d-force-graph from a CDN, starfield, HUD, side panel, ask bar |
 | `viewer/graph-data.js` | generated - rebuilt by `build.py`, never edit by hand |
@@ -627,6 +774,8 @@ mock never does.
 | `tools/verify-sight.mjs` | "give it sight" under test: the held stream, the loud indicator, one frame at the ask, the type read back, the ended share |
 | `tools/browser-sight-check.mjs` | the real thing, in a real browser with a real `getDisplayMedia` share, photographed at every step |
 | `tools/verify-brain.mjs` | "change its brain by voice" under test: the chip's label, command-vs-question routing, the refusal, a swap during a live share |
+| `tools/verify-focus.mjs` | focus sessions in the page under test: the card, the clock that only ever comes from the server, the tint on drift, the spoken callout, the report card, and an identity sweep across every on-screen surface |
+| `tools/focus-timings.py` | prints the focus timings from a running server - the knobs, the band, the field numbers and a reading of them - before anybody touches `GRACE_MS` |
 | `tools/browser-brain-check.mjs` | the swap in a real browser against the real server: the OpenRouter route is the only live one, so the swap has to be real |
 | `tools/fixtures/screen-frame.jpg` | the 640x360 screen used as a real JPEG in the python checks (11 KB, no Pillow needed) |
 | `tools/browser-capture-check.mjs` | the real thing in a real browser: file on disk, star in the running galaxy, then the follow-up question |
@@ -707,6 +856,22 @@ npm - which is exactly the situation this project was verified in.
   brain" resets the page as well as the server, and - the point of the feature - that a refusal
   is shown, spoken, marked `NOT CHANGED`, leaves the chip exactly where it was, and is never
   dressed up as a success.
+* `tools/verify-focus.mjs` - focus sessions in the page, headlessly and on a virtual clock: that the
+  countdown comes from the server and is never ticked locally, that the card paints the phase, the
+  tint, the tier, the bar and the footer from the state it is handed, that a drift is spoken once and
+  not on every poll, that a muted tab is silent but still tinted, that ten phrasings route to
+  `/focus` while ten questions about focus still go to `/chat`, that the FOCUS button starts and
+  ends a session, that a refusal is shown rather than dressed up, and that the report card and the
+  ledger totals land on screen - with an identity sweep over every element the page can show.
+* `tools/verify.py` also runs focus sessions end to end: the parser ("twenty five minutes" is
+  1500 seconds, "half an hour" is 1800), the grace and the tiers on a synthetic clock (a 300ms
+  flick is not a drift; tier 2 arrives when the excursion really is 20s old, not when 20s of ticks
+  have passed), the refund that an excuse really makes, home base, five ticks launching five fresh
+  queries, a dead reader stopping the clock instead of guessing, the report's arithmetic, the 85%
+  clean rule and the streak in the ledger, a two-second session being called a poke and kept out of
+  the ledger - and then the same loop over real HTTP against a real server on a real tick, with a
+  load of privacy sweeps: no app, no host and no path in the state, the log, the ledger, the timings
+  or the response, and an import-time refusal of any line template that carries an app field.
 * `tools/browser-brain-check.mjs` - the swap in a real browser against the real server, with a
   trick that makes it unfakeable: the server's OpenAI base URL points at a port where nothing
   is listening, so the only route that can answer is OpenRouter. The swap therefore has to be

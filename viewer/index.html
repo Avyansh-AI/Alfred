@@ -184,6 +184,13 @@
   .src.primary{color:var(--ink); border-color:rgba(123,255,196,.45); background:rgba(123,255,196,.07)}
   #answer-text.greeting{color:var(--dim); font-style:italic}
   #answer-text.captured{color:#c8ffe4}
+  #answer-text.focus{color:#d6f4ff}
+  #answer-text.focus.refused{color:var(--warn)}
+  #focus-card.flash{animation:focus-flash .7s ease-out}
+  @keyframes focus-flash{
+    0%{box-shadow:0 0 0 0 rgba(255,196,107,.55), 0 18px 50px rgba(0,0,0,.5)}
+    100%{box-shadow:0 0 0 22px rgba(255,196,107,0), 0 18px 50px rgba(0,0,0,.5)}
+  }
   #answer-text.brain{color:#c8ffe4}
   #answer-text.brain.refused{color:var(--warn)}
   #answer-text.captured.failed{color:var(--warn)}
@@ -294,6 +301,63 @@
   }
   #sight-badge.ended .rec{background:var(--warn); box-shadow:none; animation:none}
 
+  /* ---------- the focus card: pinned top-right, and it TINTS on drift ---------- */
+  #focus-card{
+    position:fixed; top:18px; right:18px; z-index:11; width:232px;
+    padding:12px 14px 11px; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--glass); backdrop-filter:blur(12px);
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+    transition:border-color .25s ease, box-shadow .25s ease, background .25s ease;
+  }
+  #focus-card[hidden]{display:none}
+  #focus-card .fc-top{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    font-size:10.5px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--dim);
+  }
+  #focus-card .fc-tier{
+    font-size:10px; letter-spacing:.1em; color:var(--bad); opacity:0;
+    transition:opacity .2s ease;
+  }
+  #focus-card .fc-tier.on{opacity:1}
+  #focus-clock{
+    font-family:var(--mono); font-size:34px; line-height:1.1; font-weight:600;
+    letter-spacing:.02em; margin:5px 0 7px;
+  }
+  #focus-card .fc-bar{height:4px; border-radius:3px; background:rgba(255,255,255,.09); overflow:hidden}
+  #focus-card .fc-bar i{display:block; height:100%; width:0%; background:var(--accent);
+    transition:width .9s linear, background .25s ease}
+  #focus-card .fc-foot{
+    display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+    margin-top:8px; font-size:11.5px; color:var(--dim);
+  }
+  #focus-state{font-weight:600; color:var(--ink)}
+  #focus-meta{font-size:11px; text-align:right; line-height:1.45}
+  #focus-end{
+    margin-top:9px; width:100%; padding:7px 10px; border-radius:9px; cursor:pointer;
+    font:inherit; font-size:11.5px; font-weight:600; letter-spacing:.04em;
+    color:var(--ink); background:rgba(255,255,255,.06); border:1px solid var(--line);
+  }
+  #focus-end:hover{background:rgba(255,255,255,.11)}
+  /* the tint. Amber at tier 1, deeper at 2, and a slow red pulse at 3 */
+  #focus-card.drift{border-color:rgba(255,196,107,.75); background:rgba(44,32,10,.82);
+    box-shadow:0 18px 50px rgba(0,0,0,.5), 0 0 26px rgba(255,196,107,.28)}
+  #focus-card.drift #focus-state{color:var(--warn)}
+  #focus-card.drift #focus-clock{color:#ffe4b8}
+  #focus-card.drift.t2{border-color:rgba(255,150,90,.85); background:rgba(56,26,8,.85)}
+  #focus-card.drift.t3{border-color:rgba(255,120,120,.95); background:rgba(62,12,16,.88);
+    animation:focus-nag 1.9s ease-in-out infinite}
+  @keyframes focus-nag{
+    0%,100%{box-shadow:0 18px 50px rgba(0,0,0,.5), 0 0 22px rgba(255,110,110,.3)}
+    50%{box-shadow:0 18px 50px rgba(0,0,0,.5), 0 0 40px rgba(255,110,110,.55)}
+  }
+  #focus-card.ended #focus-clock{color:var(--ok)}
+  #focus-card.blind{border-style:dashed}
+  #focus-card.blind #focus-state{color:var(--warn)}
+  #focus-btn.on{background:rgba(110,231,255,.16); border-color:rgba(110,231,255,.5); color:var(--accent)}
+  #focus-btn.drift{background:rgba(255,196,107,.18); border-color:rgba(255,196,107,.6); color:var(--warn)}
+  @media (max-width:720px){ #focus-card{width:186px; padding:10px 11px} #focus-clock{font-size:27px} }
+
   /* the frame he was actually shown, so you can check it yourself */
   #a-frame{display:flex; gap:11px; align-items:center; padding:0 16px 12px}
   #a-frame[hidden]{display:none}
@@ -363,6 +427,7 @@
   <div id="hint">
     drag to orbit &middot; scroll to zoom &middot; click a star for its note &middot; <kbd>/</kbd> to ask
     &middot; say &ldquo;switch to fable&nbsp;5.1&rdquo; for another brain
+    &middot; say &ldquo;thirty minutes on this&rdquo; and he will watch you work
   </div>
   <div id="key-note" hidden></div>
 </div>
@@ -427,6 +492,16 @@
               stroke-linecap="round"/>
       </svg>
     </button>
+    <button id="focus-btn" type="button" aria-pressed="false" aria-label="Start a focus session"
+            title="Focus session: watch where you are and call out drift (click again to end)">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+        <circle cx="12" cy="13" r="7.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M12 9.6V13l2.6 1.7" fill="none" stroke="currentColor" stroke-width="1.7"
+              stroke-linecap="round"/>
+        <path d="M9.4 3.2h5.2" fill="none" stroke="currentColor" stroke-width="1.7"
+              stroke-linecap="round"/>
+      </svg>
+    </button>
     <button id="speak-toggle" type="button" aria-pressed="true"
             aria-label="Spoken answers" title="Spoken answers on (click to silence)">
       <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
@@ -439,6 +514,23 @@
     </button>
     <button id="send" type="submit">Ask</button>
   </form>
+</div>
+
+<!-- focus sessions: the countdown lives on the SERVER, so this card is only ever a
+     view of it. It shows numbers and states, never an app or a tab: those are compared
+     and thrown away inside the reader, and there is no field here to put one in. -->
+<div id="focus-card" hidden>
+  <div class="fc-top">
+    <span id="focus-phase">focus</span>
+    <span class="fc-tier" id="focus-tier"></span>
+  </div>
+  <div id="focus-clock">--:--</div>
+  <div class="fc-bar"><i id="focus-fill"></i></div>
+  <div class="fc-foot">
+    <span id="focus-state">on target</span>
+    <span id="focus-meta"></span>
+  </div>
+  <button id="focus-end" type="button">End the session</button>
 </div>
 
 <!-- the unmistakable part: while a share is live this ring is around everything -->
@@ -1480,6 +1572,9 @@ async function boot3d(){
   fetch('/health?hour=' + new Date().getHours()).then(r => r.ok ? r.json() : null).then(h => {
     if (!h) return;
     if (h.greeting) greet(h.greeting);
+    // is a focus session already running? A reloaded tab rejoins it rather than losing
+    // it, because the session is the server's, not this page's
+    joinFocus();
     // the character's own lines for the screen share - the viewer carries none of them
     if (h.sight && h.sight.lines) sightLines = h.sight.lines;
     // which brain is in the chair, and every name he can wear: straight from the server
@@ -1583,6 +1678,29 @@ async function boot3d(){
                        isCommand: isBrainCommand,
                        paint: paintBrain,
                        submit: submitBrain
+                     },
+                     // focus sessions: the card, the button, the routing
+                     focus: {
+                       POLL_MS: FOCUS_POLL_MS, DEFAULT_MINUTES: FOCUS_DEFAULT_MINUTES,
+                       state: () => focusState,
+                       spokenSeq: () => focusSpoken,
+                       isCommand: isFocusCommand,
+                       paint: paintFocus, submit: submitFocus, button: focusButton,
+                       join: joinFocus, poll: pollFocus, clock: focusClock,
+                       card: () => {
+                         const card = $('focus-card');
+                         return {hidden: !!card.hidden, className: card.className || '',
+                                 phase: $('focus-phase').textContent,
+                                 clock: $('focus-clock').textContent,
+                                 fill: $('focus-fill').style.width,
+                                 state: $('focus-state').textContent,
+                                 meta: $('focus-meta').textContent,
+                                 tier: $('focus-tier').textContent,
+                                 end: $('focus-end').textContent};
+                       },
+                       button_face: () => ({pressed: $('focus-btn').getAttribute('aria-pressed'),
+                                            className: $('focus-btn').className || ''}),
+                       reportShown: () => focusReportShown
                      },
                      // growing the brain by voice: filing a note and watching it arrive
                      capture: {
@@ -2046,6 +2164,26 @@ if (speakBtn){
     }
   });
 }
+/* ------------------------------------------------------------------ the focus UI */
+$('focus-btn').addEventListener('click', focusButton);
+$('focus-end').addEventListener('click', async (event) => {
+  event.preventDefault();
+  await submitFocus('end the session');
+});
+/* On boot, ask the server whether a session is already running: a reloaded tab rejoins
+   it, wherever it was started from. Nothing is spoken here - the callouts and the report
+   are spoken as they arrive, so a page that opens mid-drift hears the next nag. */
+async function joinFocus(){
+  // The same request the poll makes, with `since` at whatever this tab has already dealt
+  // with (nothing, on a fresh page). The server decides what is still worth saying: it
+  // returns callouts no older than CALLOUT_REPLAY_S, so a page that opens mid-drift hears
+  // the callout that just happened - and never one from ten minutes ago.
+  try {
+    await pollFocus();
+    if (focusState && focusState.phase !== 'idle') startFocusPoll();
+  } catch (err){ /* no session to join */ }
+}
+
 /* ------------------------------------------------------------ the brain UI */
 const form = $('ask-form'), input = $('q'), send = $('send');
 const answerBox = $('answer'), answerText = $('answer-text'),
@@ -2461,6 +2599,273 @@ async function submitBrain(said){
   }
 }
 
+/* ---------------------------------------------------------------------------
+   FOCUS SESSIONS - "thirty minutes on this".
+
+   The session lives on the SERVER, on a one-second tick. This side is a view: it polls
+   /focus once a second while a session is live, paints the card, and speaks whatever the
+   server has decided to say. Closing the tab, reloading it, or opening it on another
+   machine does not touch the session - and the countdown is the server's clock, not this
+   one's, so a stalled tab cannot slow it down either.
+
+   NOTHING HERE KNOWS WHICH APP YOU ARE IN. The state is booleans and counters: on target
+   or not, which KIND of drift (an app or a tab - a category, not a name), how long, how
+   many. The app and the host are compared and discarded inside the server's reader.
+   --------------------------------------------------------------------------- */
+const FOCUS_POLL_MS = 1000;          // how often the card asks the server what is happening
+const FOCUS_DEFAULT_MINUTES = 30;    // what the button starts
+const FOCUS_CARD_LINGER_MS = 12000;  // how long the card stays after the report card
+const FOCUS_DRIFT_WORDS = {app: 'drifting \u00b7 another app', tab: 'drifting \u00b7 another tab'};
+
+// The routing shapes. Deliberately anchored and short: a question that merely mentions
+// focus, work, or a number of minutes must stay a question. The server re-parses every
+// command it is sent and answers "that is not a focus command" rather than acting on one,
+// so this is only about which door the utterance goes through.
+const FOCUS_START_RE = /\b(?:minutes?|mins?|hours?|hrs?)\b[^?]*?\b(?:on\s+this|on\s+it|focus|of\s+work|of\s+focus|session)\b|\b(?:focus|work)\b[^?]*?\b(?:for|on)\b[^?]*?\b(?:minutes?|mins?|hours?|hrs?)\b/i;
+const FOCUS_END_RE = /^\s*(?:please\s+)?(?:end|abort|finish|close)\b[^?]*$|^\s*(?:i'?m|i\s+am)\s+done\b|^\s*call\s+it(\s+a\s+session)?\s*$|^that'?s\s+enough\s*$/i;
+const FOCUS_PAUSE_RE = /^\s*(?:please\s+)?(?:pause|hold\s+on|take\s+a\s+break|break)\b[^?]*$/i;
+const FOCUS_RESUME_RE = /^\s*(?:please\s+)?(?:resume|unpause|continue|carry\s+on|back\s+to\s+work)\b[^?]*$/i;
+const FOCUS_OTHER_RE = /^\s*(?:please\s+)?(?:call\s+me\s+out|nag\s+me|tell\s+me|remind\s+me|check\s+on\s+me|call\s+it\s+out)\s+every\b[^?]*$|^\s*(?:snooze(?:\s+for)?|give\s+me|shush|quiet)\b[^?]*$|^\s*(?:extend|add)\b[^?]*$|^\s*(?:it'?s|its|it\s+is|that'?s|thats|that\s+is)\s+(?:ok|okay|fine|alright|all\s+right)\b[^?]*$|^\s*(?:i'?m|im|i\s+am)\s+(?:just\s+)?(?:doing\s+|in\s+)?research\b[^?]*$|^\s*excused\b/i;
+
+let focusState = null;          // the last state the server sent
+let focusSpoken = 0;            // the highest callout seq this tab has spoken
+let focusPoll = null;           // the poll timer
+let focusLinger = null;         // when to put the card away after the report
+let focusReportShown = null;    // the report the answer card is showing
+let focusRetired = false;       // the card has been put away after a report card
+let focusButtonBusy = false;
+
+function isFocusCommand(text, phase){
+  const t = String(text || '').trim();
+  if (!t || t.length > 90 || t.indexOf('?') >= 0) return false;
+  const live = phase === 'running' || phase === 'paused';
+  if (live){
+    // a session is on: these are commands about it
+    if (FOCUS_END_RE.test(t) || FOCUS_PAUSE_RE.test(t) || FOCUS_RESUME_RE.test(t)) return true;
+    if (FOCUS_OTHER_RE.test(t) && t.split(/\s+/).length <= 10) return true;
+  }
+  // starting only when there is nothing to talk about yet - or, with a session live,
+  // "another twenty minutes" is the extend command and the server says so
+  return FOCUS_START_RE.test(t) && t.split(/\s+/).length <= 10;
+}
+
+function focusClock(seconds){
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60), s = total % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+function paintFocus(state){
+  const card = $('focus-card');
+  if (!state || !state.phase || state.phase === 'idle'){
+    focusState = state || null;
+    card.hidden = true;
+    $('focus-btn').className = '';
+    $('focus-btn').setAttribute('aria-pressed', 'false');
+    return;
+  }
+  focusState = state;
+  const live = state.phase === 'running' || state.phase === 'paused';
+  if (state.phase !== 'ended') focusRetired = false;
+  if (focusRetired) return;            // the report card has been shown and put away
+  card.hidden = false;
+  card.className = state.phase === 'ended' ? 'ended'
+                 : (state.reader === 'blind' ? 'blind'
+                 : (state.drifting ? ('drift' + (state.tier >= 3 ? ' t3' : state.tier === 2 ? ' t2' : '')) : ''));
+  $('focus-phase').textContent = state.phase === 'ended' ? 'session closed'
+                               : state.phase === 'paused' ? 'focus \u00b7 paused' : 'focus';
+  $('focus-tier').textContent = state.drifting ? ('tier ' + state.tier) : '';
+  $('focus-tier').className = state.drifting ? 'fc-tier on' : 'fc-tier';
+  $('focus-clock').textContent = focusClock(state.remaining_s);
+  const done = state.planned_s ? Math.min(100, Math.max(0,
+      ((state.planned_s - state.remaining_s) / state.planned_s) * 100)) : 0;
+  $('focus-fill').style.width = state.phase === 'ended' ? '100%' : (done.toFixed(1) + '%');
+  $('focus-fill').style.background = state.drifting
+      ? (state.tier >= 3 ? 'var(--bad)' : 'var(--warn)') : 'var(--accent)';
+  // the state line: a category, a state, a duration - never a name
+  let line;
+  if (state.phase === 'ended') line = 'closed \u00b7 ' + state.clean_pct + '% clean';
+  else if (state.reader === 'blind') line = 'cannot see the front app';
+  else if (state.phase === 'paused') line = 'paused';
+  else if (state.drifting && state.excused) line = 'excused';
+  else if (state.drifting) line = FOCUS_DRIFT_WORDS[state.reason] || 'drifting';
+  else if (state.on_target && state.reason === 'home') line = 'on target \u00b7 home base';
+  else line = 'on target';
+  if (state.snoozed) line += ' \u00b7 snoozed ' + Math.ceil(state.snooze_s_left) + 's';
+  $('focus-state').textContent = line;
+  const bits = [];
+  if (state.phase === 'ended'){
+    bits.push(Math.round((state.planned_s - state.remaining_s) / 60) + 'm of ' +
+              Math.round(state.planned_s / 60) + 'm');
+  } else {
+    bits.push(Math.round(state.on_s / 60) + 'm on target');
+    if (state.drifting && state.off_open_s >= 1) bits.push(Math.round(state.off_open_s) + 's off');
+  }
+  if (state.drifts) bits.push(state.drifts + (state.drifts === 1 ? ' drift' : ' drifts'));
+  if (state.refunds) bits.push(state.refunds + ' refunded');
+  bits.push('nag ' + Math.round(state.nag_s) + 's');
+  $('focus-meta').textContent = bits.join(' \u00b7 ');
+  const btn = $('focus-btn');
+  btn.setAttribute('aria-pressed', live ? 'true' : 'false');
+  btn.className = state.drifting ? 'drift' : (live ? 'on' : '');
+  if (state.reader === 'blind' && live){
+    $('focus-meta').textContent = 'nothing is being counted \u00b7 ' + bits.join(' \u00b7 ');
+  }
+  // the report card, once, on the answer card where every other line of his lives
+  if (state.report && state.report.text && (!focusReportShown || focusReportShown !== state.report.text)){
+    focusReportShown = state.report.text;
+    renderFocusReport(state);
+  }
+}
+
+function renderFocusReport(state){
+  const r = state.report || {};
+  answerText.className = 'focus';
+  answerText.textContent = r.text || '';
+  answerModel.textContent = '';
+  answerSrc.innerHTML = '';
+  hideFrame();
+  const bits = [];
+  if (r.planned) bits.push(Math.round(r.planned) + 'm planned');
+  if (r.on != null) bits.push(r.on + 'm on target');
+  if (r.pct != null) bits.push(r.pct + '% clean');
+  if (r.drifts != null) bits.push(r.drifts + (r.drifts === 1 ? ' drift' : ' drifts'));
+  if (r.refunds) bits.push(r.refunds + ' refunded');
+  bits.push(r.counted ? ('streak ' + r.streak) : 'not in the ledger');
+  answerFoot.textContent = bits.join(' \u00b7 ');
+  showAnswer();
+}
+
+/* one poll: paint, and speak whatever the server has said since this tab last spoke */
+async function pollFocus(){
+  try {
+    const res = await fetch('/focus?since=' + focusSpoken, {cache: 'no-store'});
+    if (!res.ok) return;
+    const state = await res.json();
+    if (!state || state.ok === false) return;
+    paintFocus(state);
+    for (const call of (state.speak || [])){
+      if (call.seq <= focusSpoken) continue;
+      focusSpoken = call.seq;
+      speak(call.text);                       // the callouts, in his voice, in order
+      if (call.tier >= 1) flashFocusCard();
+    }
+    focusSpoken = Math.max(focusSpoken, state.since || 0);
+    if (state.phase === 'ended' && !focusLinger){
+      focusLinger = setTimeout(() => {
+        focusRetired = true;
+        $('focus-card').hidden = true;      // and a later poll cannot bring it back
+        stopFocusPoll();
+      }, FOCUS_CARD_LINGER_MS);
+    }
+  } catch (err){ /* the server is away: the card keeps the last state it had */ }
+}
+
+function startFocusPoll(){
+  if (focusPoll) return;
+  focusPoll = setInterval(pollFocus, FOCUS_POLL_MS);
+}
+function stopFocusPoll(){
+  if (focusPoll){ clearInterval(focusPoll); focusPoll = null; }
+  if (focusLinger){ clearTimeout(focusLinger); focusLinger = null; }
+}
+function flashFocusCard(){
+  const card = $('focus-card');
+  card.classList.remove('flash');
+  void card.offsetWidth;                      // restart the animation
+  card.classList.add('flash');
+  setTimeout(() => card.classList.remove('flash'), 700);
+}
+
+/* ask the server to do something - the same door the voice uses */
+async function submitFocus(text){
+  send.disabled = true;
+  const label = (focusState && focusState.phase !== 'idle') ? 'the session\u2026' : 'starting\u2026';
+  thinking(label);
+  setVoiceStatus('thinking', 'focus\u2026');
+  try {
+    const res = await fetch('/focus', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.error){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'nothing to do with the notes'};
+      renderError(data.error || `The server returned HTTP ${res.status}.`, data.hint || '');
+      await speak(data.error || 'I could not do that, sir.');
+      return;
+    }
+    input.value = '';                          // the command has been handled: free the bar
+    paintFocus(data.focus || null);
+    if (data.focus) focusSpoken = Math.max(focusSpoken, data.focus.since || 0);
+    if (data.focus && data.focus.phase !== 'idle') startFocusPoll();
+    answerText.className = data.ok ? 'focus' : 'focus refused';
+    answerText.textContent = data.answer || '';
+    answerModel.textContent = '';
+    answerSrc.innerHTML = '';
+    hideFrame();
+    answerFoot.textContent = focusFoot(data);
+    showAnswer();
+    await speak(data.answer || data.spoken || '');
+  } catch (err){
+    renderError('Could not reach the server.', String(err));
+    await speak('I could not reach the server, sir, so nothing was changed.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+function focusFoot(data){
+  const st = data.focus || {};
+  const bits = [];
+  if (!data.ok) bits.push('NOTHING CHANGED');
+  if (st.phase) bits.push(st.phase);
+  if (st.planned_s) bits.push(Math.round(st.planned_s / 60) + 'm planned');
+  if (st.phase && st.phase !== 'idle') bits.push(Math.round(st.on_s / 60) + 'm on target');
+  if (st.drifts) bits.push(st.drifts + (st.drifts === 1 ? ' drift' : ' drifts'));
+  if (st.reader === 'blind') bits.push('cannot see the front app');
+  return bits.join(' \u00b7 ');
+}
+
+/* the button: start when nothing is running, end when something is */
+async function focusButton(){
+  if (focusButtonBusy) return;
+  focusButtonBusy = true;
+  try {
+    const live = focusState && (focusState.phase === 'running' || focusState.phase === 'paused');
+    if (live) return await submitFocus('end the session');
+    send.disabled = true;
+    thinking('starting\u2026');
+    try {
+      const res = await fetch('/focus', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'start', minutes: FOCUS_DEFAULT_MINUTES})
+      });
+      const data = await res.json().catch(() => ({}));
+      answerText.className = data.ok ? 'focus' : 'focus refused';
+      answerText.textContent = data.answer || data.error || '';
+      answerModel.textContent = '';
+      answerSrc.innerHTML = '';
+      hideFrame();
+      answerFoot.textContent = focusFoot(data);
+      showAnswer();
+      if (data.focus){ paintFocus(data.focus); focusSpoken = Math.max(focusSpoken, data.focus.since || 0); }
+      if (data.focus && data.focus.phase !== 'idle') startFocusPoll();
+      await speak(data.answer || data.error || '');
+    } catch (err){
+      renderError('Could not reach the server.', String(err));
+    }
+  } finally {
+    focusButtonBusy = false;
+    send.disabled = false;
+    input.focus();
+  }
+}
+
 /* The answer card, for a swap or a refusal. A refusal says so in the footer, in plain
    words, so nobody can read a refusal as a success. */
 function renderBrain(data){
@@ -2490,13 +2895,17 @@ async function submitQuestion(question){
   //    the notes and not a question about the screen. It is decided first of all, so a
   //    brain swap works whatever else is going on, including during a screen share.
   if (isBrainCommand(question)) return submitBrain(question);
-  // 2. "remember that ..." is a note, not a question - it goes to /remember.
+  // 2. a focus session: "thirty minutes on this", "pause", "give me fifteen seconds",
+  //    "it's okay, I'm doing research", "end the session". Decided here, BEFORE the
+  //    screen check, so a session can be driven by voice while a share is live.
+  if (isFocusCommand(question, focusState && focusState.phase)) return submitFocus(question);
+  // 3. "remember that ..." is a note, not a question - it goes to /remember.
   if (isRemember(question)) return submitCapture(question);
-  // 3. while a share is live, EVERY question is about the screen: it carries one frame
+  // 4. while a share is live, EVERY question is about the screen: it carries one frame
   //    taken right now and goes to /see. No keyword guessing while sharing, so a
   //    screen question can never be answered from the notes by mistake.
   if (shareState === 'live') return submitScreen(question, {reason: 'sharing'});
-  // 4. nothing is being shared and the question is plainly pointing at a screen: he says
+  // 5. nothing is being shared and the question is plainly pointing at a screen: he says
   //    so instead of answering it from the notes. "The share has ended" if he was looking
   //    at your screen a moment ago, "I have not been shown your screen" otherwise - and
   //    after the window has passed it is a normal question again, because a session that

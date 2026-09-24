@@ -26,13 +26,21 @@ export const ELEMENT_IDS = [
   'mic','speak-toggle','voice-status','voice-text','voice-detail',
   'sight','sight-ring','sight-badge','sight-badge-text','sight-badge-sub',
   'a-frame','frame-shot','frame-meta',
-  'brain-chip','brain-label','brain-temp'
+  'brain-chip','brain-label','brain-temp',
+  'focus-btn','focus-card','focus-phase','focus-tier','focus-clock','focus-fill',
+  'focus-state','focus-meta','focus-end'
 ];
 
 /* ------------------------------------------------------------- virtual clock */
 export function makeClock(){
   let now = 0, nextId = 1;
   const timers = new Map();
+  // Intervals need their own "has it been cleared" set: advance() deletes a timer from
+  // the map before running it (that is how a one-shot is spent), so a repeating timer
+  // cannot use the map's presence to decide whether it is still wanted - it never is.
+  // Until 2026-09-23 it did, which meant setInterval NEVER fired under the fake clock,
+  // and every interval-driven path in the viewer was silently untested.
+  const cleared = new Set();
   return {
     now: () => now,
     setTimeout(fn, ms = 0){
@@ -40,18 +48,19 @@ export function makeClock(){
       timers.set(id, {fn, at: now + Math.max(0, ms|0)});
       return id;
     },
-    clearTimeout(id){ timers.delete(id); },
+    clearTimeout(id){ timers.delete(id); cleared.add(id); },
     setInterval(fn, ms = 0){                    // simple repeating timer
       const id = nextId++;
+      const every = Math.max(1, ms|0);
       const tick = () => {
-        if (!timers.has(id)) return;
+        if (cleared.has(id)) return;            // clearInterval won the race
+        timers.set(id, {fn: tick, at: now + every});   // re-arm BEFORE running
         fn();
-        timers.set(id, {fn: tick, at: now + Math.max(1, ms|0)});
       };
-      timers.set(id, {fn: tick, at: now + Math.max(1, ms|0)});
+      timers.set(id, {fn: tick, at: now + every});
       return id;
     },
-    clearInterval(id){ timers.delete(id); },
+    clearInterval(id){ cleared.add(id); timers.delete(id); },
     /** run every timer due within `ms`, in order, advancing the clock */
     advance(ms){
       const target = now + ms;

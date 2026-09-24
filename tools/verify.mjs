@@ -12,6 +12,7 @@
  * failure mode that shows up in a browser as a blank black page.
  */
 import fs from 'node:fs';
+import {ELEMENT_IDS} from './harness.mjs';
 import path from 'node:path';
 import vm from 'node:vm';
 
@@ -44,12 +45,25 @@ const elements = new Map();
 function makeEl(id, tag = 'div') {
   const el = {
     id, tagName: tag.toUpperCase(), children: [], style: {}, dataset: {},
-    hidden: false, className: '', textContent: '', value: '', placeholder: '', src: '',
+    hidden: false, textContent: '', value: '', placeholder: '', src: '',
+    // className and classList are two views of ONE set, the way they are in a browser.
+    // Until 2026-09-23 this mock had no classList.toggle at all, and no classList at all
+    // on elements whose id the test file did not list - which is how a missing id turned
+    // into "paintBrain is not a function" rather than a failing assertion.
+    get className() { return [...this.classList._s].join(' '); },
+    set className(v) { this.classList._s = new Set(String(v || '').split(/\s+/).filter(Boolean)); },
     classList: {
       _s: new Set(),
       add(...c) { c.forEach(x => this._s.add(x)); },
       remove(...c) { c.forEach(x => this._s.delete(x)); },
-      contains(c) { return this._s.has(c); }
+      contains(c) { return this._s.has(c); },
+      toggle(c, force) {
+        const want = force === undefined ? !this._s.has(c) : !!force;
+        if (want) this._s.add(c); else this._s.delete(c);
+        return want;
+      },
+      item(i) { return [...this._s][i] ?? null; },
+      get length() { return this._s.size; }
     },
     set innerHTML(v) { this._html = v; },
     get innerHTML() { return this._html || ''; },
@@ -275,12 +289,11 @@ check(code !== original, 'the harness patched the three.js import for headless r
 check(code.includes('await loadScript(CFG.graph)'),
       "the viewer's real loadScript() is exercised (CDN shim, not stubbed out)");
 
-['stage','grade','hud','stats','status','status-text','legend','hint','panel','panel-close',
- 'panel-label','panel-group','panel-body','panel-excerpt','neigh-title','panel-neighbours',
- 'panel-meta','ask-wrap','answer','a-who','a-model','a-close','answer-text','answer-sources',
- 'a-foot','ask-form','q','send','boot','boot-msg','key-note',
- 'sight','sight-ring','sight-badge','sight-badge-text','sight-badge-sub',
- 'a-frame','frame-shot','frame-meta'].forEach(id => makeEl(id));
+// The id list comes from tools/harness.mjs, so a new element on the page cannot be
+// forgotten here. It was a hand-copied list until 2026-09-23, and it had already drifted:
+// the brain chip and the focus card were missing, and the module threw at boot the moment
+// the focus wiring called addEventListener on an element this mock had never created.
+ELEMENT_IDS.forEach(id => makeEl(id));
 
 const mock = buildMock();
 const sandbox = {window: windowMock, document: documentMock, console, setTimeout, clearTimeout,
