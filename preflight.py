@@ -1200,10 +1200,17 @@ def check_focus(report: Report, base: str, health: dict, timeout: float, enabled
             return
         notes.append("%d tick(s) in 2.6s with no browser open, %d fresh reader run(s), the "
                      "clock down %.0fs" % (ticks, runs, left_before - left_after))
-        notes.append("a callout lands between TICK_S and TICK_S + GRACE_MS = %.0f..%.0fms "
-                     "(python3 tools/focus-timings.py prints the field numbers)"
-                     % (float(after.get("tick_s") or 0) * 1000.0,
-                        float(after.get("tick_s") or 0) * 1000.0 + float(after.get("grace_ms") or 0)))
+        # the grace is a floor on COUNTED off-target time, not a stopwatch from the moment you
+        # wandered: the tick that first sees a drift charges the whole window that led to it
+        # (TICK_S = %.0fms at the defaults), so the wait a person feels is the tick's phase plus
+        # the page's poll. Saying "callouts land at 1000..1800ms" was measured wrong - a real
+        # one arrived at 468ms - and preflight repeating it made the wrong number look official.
+        notes.append("the grace is a floor on counted off-target time: a callout needs %.0fms of"
+                     " it counted (GRACE_MS), and the tick that first sees a drift charges its"
+                     " whole window (TICK_S = %.0fms), so he can speak on the tick that finds it"
+                     " (python3 tools/focus-timings.py prints the field numbers)"
+                     % (float(after.get("grace_ms") or 0),
+                        float(after.get("tick_s") or 0) * 1000.0))
     finally:
         # never leave the person sitting in a session preflight started for itself
         stopped = as_json(post(base + "/focus", {"text": "end the session"}, timeout)[2]) or {}
