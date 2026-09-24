@@ -816,27 +816,44 @@ def check_restart(report: Report, health: dict) -> None:
     """incident 2026-09-23: server.py was edited and the running process kept answering
     with the old code. Every other check stayed green - the old code still worked - and the
     only clue was that behaviour did not change.
+
+    The tick that drives a focus session lives in focus.py, which the server imports and
+    runs in a thread: editing it and leaving the old process up is the same lie in a second
+    file, and it shows up the same way - numbers that will not move.
     """
-    name = "10. the running server is not older than server.py"
+    name = "10. the running server is not older than the code it runs"
     uptime = health.get("uptime_s")
     if not isinstance(uptime, (int, float)):
         report.line("warn", name, "the server did not report an uptime",
-                    ["restart it - this check needs the current server.py"])
+                    ["restart it - this check needs to compare the process with the files"])
         return
-    path = os.path.join(ROOT, "server.py")
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        report.line("warn", name, "could not stat server.py", [])
-        return
+    modules = ("server.py", "focus.py")
     started = time.time() - float(uptime)
-    if mtime > started + 1:
-        report.line("warn", name, "server.py was edited %.1f min AFTER this process started"
-                    % ((mtime - started) / 60.0),
+    statted = 0
+    stale = []
+    for filename in modules:
+        try:
+            mtime = os.path.getmtime(os.path.join(ROOT, filename))
+        except OSError:
+            continue
+        statted += 1
+        if mtime > started + 1:
+            stale.append((mtime, filename))
+    if not statted:
+        report.line("warn", name, "could not stat %s" % " or ".join(modules), [])
+        return
+    if stale:
+        # every file that changed, newest first: naming only one of two stale files reads
+        # like the other one is current
+        stale.sort(reverse=True)
+        report.line("warn", name,
+                    "%s edited %.1f min AFTER this process started"
+                    % (" and ".join(f for _m, f in stale), (stale[0][0] - started) / 60.0),
                     ["the process has been up %s and is running older code" % minutes(uptime),
                      "restart it:  kill the server and run python3 server.py"])
         return
-    report.line("pass", name, "process up %s, and server.py has not changed since" % minutes(uptime))
+    report.line("pass", name, "process up %s, and %s have not changed since"
+                % (minutes(uptime), " and ".join(modules)))
 
 
 # --------------------------------------------------------------------------- #

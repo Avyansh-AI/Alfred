@@ -817,7 +817,7 @@ mock never does.
 | `tools/browser-focus-check.mjs` | the live loop in a real browser against a real server: FOCUS, wander off, the callout timed in milliseconds, the reload, the snooze, home base, the spoken report, the ledger, and no identity anywhere |
 | `tools/focus-timings.py` | prints the focus timings from a running server - the knobs, the band, the field numbers and a reading of them - before anybody touches `GRACE_MS` |
 | `tools/verify-preflight.py` | proves preflight's focus check can fail: four stub servers, three wrong on purpose, each failure asserted with its reason |
-| `tools/fixtures/fake-focus-server.py` | those stubs: a focus server over HTTP that is wrong in one specific way (a frozen clock, a reader never asked again, a state carrying a name) |
+| `tools/fixtures/fake-focus-server.py` | those stubs: a focus server over HTTP that is wrong in one specific way (a frozen clock, a reader never asked again, a state carrying a name), and it can claim an uptime so check 10 can be seen to fire |
 | `tools/browser-brain-check.mjs` | the swap in a real browser against the real server: the OpenRouter route is the only live one, so the swap has to be real |
 | `tools/fixtures/screen-frame.jpg` | the 640x360 screen used as a real JPEG in the python checks (11 KB, no Pillow needed) |
 | `tools/browser-capture-check.mjs` | the real thing in a real browser: file on disk, star in the running galaxy, then the follow-up question |
@@ -905,11 +905,14 @@ npm - which is exactly the situation this project was verified in.
   `/focus` while ten questions about focus still go to `/chat`, that the FOCUS button starts and
   ends a session, that a refusal is shown rather than dressed up, and that the report card and the
   ledger totals land on screen - with an identity sweep over every element the page can show.
-* `tools/verify-preflight.py` - that preflight's focus check really checks. Four servers are
-  started on free ports and preflight is run against each as a subprocess: a good one (the
-  check must pass), one whose session never ticks, one that never asks the reader again, and
-  one whose state carries a host in a string (each must fail, with the right words). It also
-  proves preflight will not touch a session that is already running.
+* `tools/verify-preflight.py` - that preflight's checks really check. Four servers are started
+  on free ports and preflight is run against each as a subprocess: a good one (check 14 must
+  pass), one whose session never ticks, one that never asks the reader again, and one whose
+  state carries a host in a string (each must fail, with the right words). It also proves
+  preflight will not touch a session that is already running, and that **check 10 fires on the
+  second file**: the fixture can claim an age (`FAKE_UPTIME_S`), so a stub claiming two hours
+  of uptime has to be caught - naming `focus.py` as well as `server.py`, because the tick that
+  stops producing numbers lives in `focus.py` and a stale process is otherwise invisible.
 * `tools/verify.py` also runs focus sessions end to end: the parser ("twenty five minutes" is
   1500 seconds, "half an hour" is 1800), the grace and the tiers on a synthetic clock (a 300ms
   flick is not a drift; tier 2 arrives when the excursion really is 20s old, not when 20s of ticks

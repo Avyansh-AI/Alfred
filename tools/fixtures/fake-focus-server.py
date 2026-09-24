@@ -19,11 +19,16 @@ modes:
   leaky    everything works, but the state carries a host in a string
              -> the privacy promise, broken
 
+FAKE_UPTIME_S=<seconds> makes /health claim the process has been up that long, which is how
+preflight's check 10 ("the running server is not older than the code it runs") is proven to
+notice a stale process without waiting for one.
+
 Nothing here is imported by the project, and nothing here talks to anything real: it is a
 few dozen lines of stdlib http.server with a deliberately wrong tick.
 """
 
 import json
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,10 +45,16 @@ STATE = {
     "reader": "live", "reader_why": "ok", "reason": "none", "drifting": False,
     "timings": {"ticks": 0, "reader_runs": 0},
 }
+FAKE_UPTIME_S = os.environ.get("FAKE_UPTIME_S")
 HEALTH = {"ok": True, "notes": 12, "model": "gpt-6-astra",
           "focus": {"phase": "idle", "can_see": True, "reader": "command", "ledger": False,
                     "tick_s": 1.0, "grace_ms": 800, "nag_s": 30.0, "sessions": 0,
                     "clean_sessions": 0, "streak": 0, "best_streak": 0}}
+# preflight's check 10 compares the age of the process with the mtime of the files it runs.
+# Claiming an age is how that check is proven to fire without waiting two hours for it.
+# A stub with no claim says nothing, and the check says so instead of guessing.
+if FAKE_UPTIME_S is not None:
+    HEALTH["uptime_s"] = float(FAKE_UPTIME_S)
 
 
 class Handler(BaseHTTPRequestHandler):

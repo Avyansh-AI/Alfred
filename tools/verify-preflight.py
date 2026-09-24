@@ -12,6 +12,10 @@ check 14 is run here against four deliberately-built servers, three of them wron
     nocache  -> fails, and says the front app is not queried fresh
     leaky    -> fails, and says the state carries a name
 
+and because a check that only ever sees a fresh process proves nothing either, check 10 gets
+the same treatment: a stub that CLAIMS to have been up for two hours (FAKE_UPTIME_S) must warn
+and name the file that really is newest - focus.py, whose tick the server imports and runs.
+
 Nothing is imported from the project: preflight.py is run as a subprocess over HTTP, exactly
 as a person runs it. Only the standard library is used.
 
@@ -132,6 +136,49 @@ def main():
                           for n in (record.get("notes") or [])
                           or [detail]),
                       "%s: the reason is on the report, not only in the mark" % mode)
+        finally:
+            stub.terminate()
+            try:
+                stub.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                stub.kill()
+
+    # and the check that catches a stale process has to look at both files the server runs.
+    # focus.py is imported by server.py and its thread is the thing that stops producing
+    # numbers, so "I restarted it" can be a lie about focus.py just as easily - and it reads
+    # exactly the same way, with every check green.
+    newest = max(("server.py", "focus.py"),
+                 key=lambda name: os.path.getmtime(os.path.join(ROOT, name)))
+    for claim, want_mark, why in (
+            ("0", "pass", "a process that has just started, running the files on disk"),
+            ("7200", "warn", "a process that claims to be two hours old")):
+        port = free_port()
+        environment = dict(os.environ, FAKE_UPTIME_S=claim)
+        stub = subprocess.Popen([sys.executable, FAKE, "good", str(port)], cwd=ROOT,
+                                env=environment, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            if not wait_for(port):
+                bad("check 10: the fixture never came up on port %d" % port)
+                continue
+            _fourteen, document = run_preflight(port)
+            record = next((r for r in (document.get("checks") or [])
+                           if str(r.get("check") or "").startswith("10.")), None)
+            if record is None:
+                bad("check 10: preflight did not report it at all (%s)"
+                    % json.dumps(document)[:200])
+                continue
+            detail = str(record.get("detail") or "")
+            check(record.get("mark") == want_mark,
+                  "check 10 against %s: %s (%s)" % (why, record.get("mark"), want_mark))
+            if want_mark == "pass":
+                check("server.py" in detail and "focus.py" in detail,
+                      "and it reads both files the server runs: %r" % detail[:120])
+            else:
+                check("AFTER this process started" in detail,
+                      "and it says a file is newer than the process: %r" % detail[:120])
+                check(newest in detail,
+                      "naming the one that really is newest (%s): %r" % (newest, detail[:120]))
         finally:
             stub.terminate()
             try:

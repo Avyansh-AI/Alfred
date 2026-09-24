@@ -34,7 +34,7 @@ if command -v node >/dev/null 2>&1; then node tools/verify-brain.mjs | tail -6; 
 step "focus sessions: the card, the noise, and the ticks (node tools/verify-focus.mjs)"
 if command -v node >/dev/null 2>&1; then node tools/verify-focus.mjs | tail -6; mark ${PIPESTATUS[0]}; else echo "   -> skipped (node not installed)"; fi
 
-step "preflight's focus check can fail: four servers, three wrong on purpose (python3 tools/verify-preflight.py)"
+step "preflight's checks can fail: wrong-on-purpose servers, and one claiming an old process (python3 tools/verify-preflight.py)"
 python3 tools/verify-preflight.py | tail -6; mark ${PIPESTATUS[0]}
 
 step "server + brain end-to-end (python3 tools/verify.py)"
