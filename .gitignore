@@ -1,0 +1,22 @@
+# your real key never belongs in git - config.json ships as a placeholder locally
+config.json
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# generated / scratch
+*.log
+.DS_Store
+
+# focus sessions: aggregates only, and it is your record, not the repo's
+focus-ledger.json
+
+# optional offline copies of the CDN files (python3 tools/vendor.py)
+viewer/vendor/
+
+# screenshots are committed as evidence for the README
+!tools/screenshots/
+!tools/screenshots/*.jpg

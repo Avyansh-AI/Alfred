@@ -1,0 +1,2993 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Alfred &middot; Knowledge Galaxy</title>
+<meta name="description" content="A 3D knowledge galaxy of your markdown notes, with a brain you can talk to.">
+<style>
+  :root{
+    --void:#03040a;
+    --ink:#e9edf7;
+    --dim:#8b95ad;
+    --dimmer:#5b6478;
+    --line:rgba(255,255,255,.09);
+    --glass:rgba(10,14,26,.72);
+    --glass-hi:rgba(20,26,44,.86);
+    --accent:#6ee7ff;
+    --warn:#ffc46b;
+    --bad:#ff8f8f;
+    --ok:#7bffc4;
+    --r:14px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--void); color:var(--ink); font-family:var(--font);
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  #stage{position:fixed; inset:0}
+  #stage canvas{display:block}
+  /* cinematic vignette + subtle colour grade over the 3D layer */
+  #grade{
+    position:fixed; inset:0; pointer-events:none; z-index:2;
+    background:
+      radial-gradient(120% 90% at 50% 45%, rgba(0,0,0,0) 42%, rgba(0,0,0,.55) 100%),
+      linear-gradient(180deg, rgba(10,16,40,.35) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,0) 70%, rgba(6,10,24,.5) 100%);
+  }
+  /* the library's hover tooltip arrives as .float-tooltip-kap */
+  .float-tooltip-kap{
+    font-family:var(--font)!important; font-size:12px!important; line-height:1.5!important;
+    color:var(--ink)!important; background:var(--glass-hi)!important;
+    border:1px solid var(--line)!important; padding:7px 11px!important;
+    border-radius:10px!important; backdrop-filter:blur(8px);
+    box-shadow:0 10px 30px rgba(0,0,0,.5)!important; letter-spacing:.2px;
+  }
+  .float-tooltip-kap b{font-weight:600}
+  .float-tooltip-kap span{color:var(--dim)}
+
+  /* ---------- top-left HUD ---------- */
+  #hud{
+    position:fixed; top:18px; left:18px; z-index:5; max-width:min(360px,46vw);
+    padding:14px 16px 13px; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--glass); backdrop-filter:blur(12px);
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  #hud h1{
+    margin:0; font-size:13px; font-weight:600; letter-spacing:.22em; text-transform:uppercase;
+  }
+  #hud h1 em{font-style:normal;color:var(--accent)}
+  #stats{margin:6px 0 0; font-size:11.5px; color:var(--dim); letter-spacing:.03em}
+  #status{
+    display:inline-flex; align-items:center; gap:6px; margin-top:9px;
+    font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:3px 9px;
+  }
+  #status .dot{width:6px;height:6px;border-radius:50%;background:var(--dim)}
+  #status.live .dot{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  #status.bad .dot{background:var(--bad); box-shadow:0 0 8px var(--bad)}
+  #legend{display:flex; flex-wrap:wrap; gap:6px; margin-top:11px}
+  .chip{
+    display:inline-flex; align-items:center; gap:6px; cursor:pointer;
+    font-size:11px; color:var(--dim); border:1px solid var(--line); border-radius:999px;
+    padding:3px 9px; background:rgba(255,255,255,.02); transition:.18s; user-select:none;
+  }
+  .chip:hover{color:var(--ink); border-color:rgba(255,255,255,.22)}
+  .chip.on{color:var(--ink); border-color:rgba(255,255,255,.3); background:rgba(255,255,255,.06)}
+  .chip i{width:7px;height:7px;border-radius:50%; display:inline-block; font-style:normal}
+  .chip .n{color:var(--dimmer)}
+  #hint{margin-top:10px; font-size:10.5px; color:var(--dimmer); line-height:1.5}
+  #key-note{margin-top:9px; font-size:10.5px; color:var(--warn); line-height:1.5}
+  /* the brain chip: which model is answering, small, in with the rest of the machinery.
+     Every word in it comes from the server - the viewer never spells a model name of its
+     own, because a name written down in two places is a name that will disagree. */
+  #brain-chip{
+    display:inline-flex; align-items:center; gap:6px; margin-top:9px;
+    font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:3px 9px;
+    background:rgba(255,255,255,.02); transition:.2s;
+  }
+  #brain-chip .b-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 8px var(--accent)}
+  #brain-chip b{color:var(--ink); font-weight:600}
+  #brain-chip .b-temp{color:var(--warn); font-style:normal; letter-spacing:.08em}
+  #brain-chip.swapped{border-color:rgba(255,196,107,.45)}
+  #brain-chip.swapped .b-dot{background:var(--warn); box-shadow:0 0 8px var(--warn)}
+  #brain-chip.flash{animation:brain-flash .8s ease-out 2}
+  @keyframes brain-flash{
+    0%{box-shadow:0 0 0 0 rgba(123,255,196,.5)}
+    70%{box-shadow:0 0 0 10px rgba(123,255,196,0)}
+    100%{box-shadow:0 0 0 0 rgba(123,255,196,0)}
+  }
+  #key-note[hidden]{display:none}
+  kbd{
+    font-family:var(--mono); font-size:10px; border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:5px; padding:1px 4px; color:var(--dim);
+  }
+
+  /* ---------- side panel ---------- */
+  #panel{
+    position:fixed; top:0; right:0; z-index:6; height:100%; width:min(390px,92vw);
+    background:linear-gradient(180deg, rgba(9,12,24,.95), rgba(6,9,18,.97));
+    border-left:1px solid var(--line); backdrop-filter:blur(14px);
+    transform:translateX(102%); transition:transform .5s cubic-bezier(.16,.8,.24,1);
+    display:flex; flex-direction:column; box-shadow:-30px 0 70px rgba(0,0,0,.5);
+  }
+  #panel.open{transform:none}
+  #panel-head{padding:20px 22px 14px; border-bottom:1px solid var(--line)}
+  #panel-close{
+    position:absolute; top:14px; right:14px; width:30px; height:30px; border-radius:8px; cursor:pointer;
+    background:rgba(255,255,255,.04); border:1px solid var(--line); color:var(--dim);
+    font-size:15px; line-height:1; display:grid; place-items:center; transition:.18s;
+  }
+  #panel-close:hover{color:var(--ink); background:rgba(255,255,255,.09)}
+  #panel-label{margin:0 34px 0 0; font-size:19px; font-weight:600; letter-spacing:-.01em; line-height:1.25}
+  #panel-group{margin-top:9px; display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--dim)}
+  #panel-group i{width:8px;height:8px;border-radius:50%;display:inline-block}
+  #panel-group code{font-family:var(--mono); font-size:10.5px; color:var(--dimmer)}
+  #panel-body{padding:18px 22px 26px; overflow-y:auto; flex:1}
+  #panel-excerpt{
+    font-size:13.5px; line-height:1.72; color:#c6cddd; white-space:pre-wrap;
+    border-left:2px solid rgba(110,231,255,.35); padding-left:14px; margin:0;
+  }
+  .p-section{margin-top:22px}
+  .p-title{
+    font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--dimmer); margin-bottom:9px;
+  }
+  #panel-neighbours{display:flex; flex-direction:column; gap:6px}
+  .neigh{
+    display:flex; align-items:center; gap:9px; cursor:pointer; text-align:left;
+    background:rgba(255,255,255,.025); border:1px solid var(--line); border-radius:10px;
+    padding:8px 11px; color:var(--dim); font-size:12.5px; font-family:var(--font); transition:.18s;
+  }
+  .neigh:hover{color:var(--ink); background:rgba(255,255,255,.07); transform:translateX(2px)}
+  .neigh i{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+  .neigh .kind{margin-left:auto; font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
+  #panel-meta{
+    margin-top:22px; padding-top:14px; border-top:1px solid var(--line);
+    font-family:var(--mono); font-size:10.5px; color:var(--dimmer); line-height:1.7;
+  }
+
+  /* ---------- ask bar ---------- */
+  #ask-wrap{
+    position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:7;
+    width:min(760px,calc(100vw - 36px)); display:flex; flex-direction:column; gap:10px;
+  }
+  #answer{
+    border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
+    background:var(--glass); backdrop-filter:blur(12px); box-shadow:0 18px 50px rgba(0,0,0,.5);
+  }
+  #answer[hidden]{display:none}
+  .a-head{
+    display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line);
+    font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--dimmer);
+  }
+  .a-head .who{color:var(--accent)}
+  .a-head button{
+    margin-left:auto; background:none; border:0; color:var(--dimmer); cursor:pointer;
+    font-size:14px; line-height:1; padding:2px 4px;
+  }
+  .a-head button:hover{color:var(--ink)}
+  #answer-text{padding:14px 16px; font-size:13.5px; line-height:1.7; color:#d5dbe8; white-space:pre-wrap}
+  #answer-text.thinking{color:var(--dim); font-style:italic}
+  #answer-text.error{color:var(--warn)}
+  #answer-sources{display:flex; flex-wrap:wrap; gap:6px; padding:0 16px 14px}
+  #answer-sources:empty{display:none}
+  .src{
+    display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:11px; color:var(--dim);
+    border:1px solid var(--line); border-radius:999px; padding:3px 10px; background:rgba(255,255,255,.03);
+    font-family:var(--font); transition:.18s;
+  }
+  .src:hover{color:var(--ink); border-color:rgba(255,255,255,.25)}
+  .src.primary{color:var(--ink); border-color:rgba(123,255,196,.45); background:rgba(123,255,196,.07)}
+  #answer-text.greeting{color:var(--dim); font-style:italic}
+  #answer-text.captured{color:#c8ffe4}
+  #answer-text.focus{color:#d6f4ff}
+  #answer-text.focus.refused{color:var(--warn)}
+  #focus-card.flash{animation:focus-flash .7s ease-out}
+  @keyframes focus-flash{
+    0%{box-shadow:0 0 0 0 rgba(255,196,107,.55), 0 18px 50px rgba(0,0,0,.5)}
+    100%{box-shadow:0 0 0 22px rgba(255,196,107,0), 0 18px 50px rgba(0,0,0,.5)}
+  }
+  #answer-text.brain{color:#c8ffe4}
+  #answer-text.brain.refused{color:var(--warn)}
+  #answer-text.captured.failed{color:var(--warn)}
+  .src i{width:6px;height:6px;border-radius:50%;font-style:normal}
+  .src .idx{font-family:var(--mono); font-size:9.5px; color:var(--dimmer)}
+  .a-foot{padding:0 16px 12px; font-family:var(--mono); font-size:10px; color:var(--dimmer)}
+  #ask-form{
+    display:flex; align-items:center; gap:10px; padding:9px 9px 9px 16px;
+    border:1px solid var(--line); border-radius:999px; background:var(--glass);
+    backdrop-filter:blur(12px); box-shadow:0 18px 50px rgba(0,0,0,.55);
+    transition:border-color .2s, box-shadow .2s;
+  }
+  #ask-form:focus-within{border-color:rgba(110,231,255,.45); box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 4px rgba(110,231,255,.07)}
+  #ask-form .sig{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);flex:0 0 auto}
+
+  /* ---------- voice: status line, mic, speaker ---------- */
+  #voice-status{
+    display:inline-flex; align-items:center; gap:8px; align-self:center;
+    font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim);
+    background:var(--glass); border:1px solid var(--line); border-radius:999px;
+    padding:5px 13px; backdrop-filter:blur(12px); max-width:100%;
+    transition:border-color .25s, color .25s;
+  }
+  #voice-status .vs-dot{
+    width:7px; height:7px; border-radius:50%; background:var(--dimmer); flex:0 0 auto;
+    transition:background .25s, box-shadow .25s;
+  }
+  #voice-detail{
+    text-transform:none; letter-spacing:.01em; color:var(--dimmer); font-size:10.5px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:38ch;
+  }
+  #voice-status[data-state="listening"]{color:var(--ok); border-color:rgba(123,255,196,.4)}
+  #voice-status[data-state="listening"] .vs-dot{background:var(--ok); box-shadow:0 0 10px var(--ok); animation:vs-pulse 1.1s ease-in-out infinite}
+  #voice-status[data-state="thinking"]{color:var(--warn); border-color:rgba(255,196,107,.4)}
+  #voice-status[data-state="thinking"] .vs-dot{background:var(--warn); box-shadow:0 0 10px var(--warn); animation:vs-pulse .8s ease-in-out infinite}
+  #voice-status[data-state="speaking"]{color:var(--accent); border-color:rgba(110,231,255,.45)}
+  #voice-status[data-state="speaking"] .vs-dot{background:var(--accent); box-shadow:0 0 10px var(--accent); animation:vs-pulse 1.4s ease-in-out infinite}
+  #voice-status[data-state="muted"]{color:#b9a6ff; border-color:rgba(185,166,255,.4)}
+  #voice-status[data-state="muted"] .vs-dot{background:#b9a6ff; box-shadow:0 0 10px #b9a6ff}
+  #voice-status[data-state="error"]{color:var(--bad); border-color:rgba(255,143,143,.4)}
+  #voice-status[data-state="error"] .vs-dot{background:var(--bad); box-shadow:0 0 10px var(--bad)}
+  @keyframes vs-pulse{0%,100%{transform:scale(1); opacity:.95}50%{transform:scale(1.35); opacity:1}}
+
+  #mic, #speak-toggle{
+    flex:0 0 auto; width:36px; height:36px; border-radius:50%; cursor:pointer;
+    display:grid; place-items:center; color:var(--dim);
+    background:rgba(255,255,255,.04); border:1px solid var(--line); transition:.18s;
+  }
+  #mic:hover, #speak-toggle:hover{color:var(--ink); background:rgba(255,255,255,.1)}
+  #mic[aria-pressed="true"]{
+    color:#04121a; background:var(--ok); border-color:var(--ok);
+    box-shadow:0 0 0 4px rgba(123,255,196,.16), 0 0 18px rgba(123,255,196,.5);
+  }
+  #speak-toggle[aria-pressed="false"]{color:var(--dimmer); opacity:.6}
+  #speak-toggle[aria-pressed="false"] .wave{display:none}
+  #speak-toggle[aria-pressed="true"]{color:var(--accent); border-color:rgba(110,231,255,.3)}
+  #ask-form.unsupported #mic{opacity:.35; cursor:not-allowed}
+
+  /* ---------- sight: sharing your screen ----------
+     This is not meant to be subtle. While a share is live there is a red ring around
+     the whole viewport and a badge across the top saying so, and the button itself is
+     lit. When the share ends the badge says that instead, and stays until the next one. */
+  #sight{
+    flex:0 0 auto; width:36px; height:36px; border-radius:50%; cursor:pointer;
+    display:grid; place-items:center; color:var(--dim);
+    background:rgba(255,255,255,.04); border:1px solid var(--line); transition:.18s;
+  }
+  #sight:hover{color:var(--ink); background:rgba(255,255,255,.1)}
+  #sight[aria-pressed="true"]{
+    color:#200404; background:#ff6b6b; border-color:#ff6b6b;
+    box-shadow:0 0 0 4px rgba(255,107,107,.18), 0 0 20px rgba(255,107,107,.55);
+  }
+  #sight.ended{color:var(--warn); border-color:rgba(255,196,107,.45)}
+  #ask-form.unsupported #sight{opacity:.35; cursor:not-allowed}
+
+  #sight-ring{
+    position:fixed; inset:0; z-index:9; pointer-events:none; opacity:0;
+    transition:opacity .25s ease;
+  }
+  #sight-ring.on{
+    opacity:1;
+    box-shadow:inset 0 0 0 3px rgba(255,107,107,.9), inset 0 0 70px rgba(255,80,80,.2);
+    animation:ring-pulse 2.1s ease-in-out infinite;
+  }
+  @keyframes ring-pulse{
+    0%,100%{box-shadow:inset 0 0 0 3px rgba(255,107,107,.85), inset 0 0 70px rgba(255,80,80,.18)}
+    50%{box-shadow:inset 0 0 0 3px rgba(255,150,150,1), inset 0 0 95px rgba(255,80,80,.32)}
+  }
+  #sight-badge{
+    position:fixed; top:13px; left:50%; transform:translateX(-50%); z-index:12;
+    display:none; align-items:center; gap:9px; padding:8px 16px; border-radius:999px;
+    font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+    background:rgba(58,8,12,.92); color:#ffdede; border:1px solid rgba(255,107,107,.8);
+    box-shadow:0 10px 30px rgba(0,0,0,.55), 0 0 22px rgba(255,80,80,.35);
+    backdrop-filter:blur(9px); white-space:nowrap; max-width:min(92vw,760px);
+  }
+  #sight-badge.on{display:flex}
+  #sight-badge .rec{
+    width:9px; height:9px; border-radius:50%; background:#ff5252; box-shadow:0 0 10px #ff5252;
+    animation:vs-pulse 1.2s ease-in-out infinite; flex:0 0 auto;
+  }
+  #sight-badge .sub{
+    text-transform:none; letter-spacing:.02em; font-weight:500; font-size:11.5px; opacity:.78;
+  }
+  #sight-badge.ended{
+    background:rgba(46,34,10,.92); color:#ffe9c2; border-color:rgba(255,196,107,.72);
+    box-shadow:0 10px 30px rgba(0,0,0,.55);
+  }
+  #sight-badge.ended .rec{background:var(--warn); box-shadow:none; animation:none}
+
+  /* ---------- the focus card: pinned top-right, and it TINTS on drift ---------- */
+  #focus-card{
+    position:fixed; top:18px; right:18px; z-index:11; width:232px;
+    padding:12px 14px 11px; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--glass); backdrop-filter:blur(12px);
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+    transition:border-color .25s ease, box-shadow .25s ease, background .25s ease;
+  }
+  #focus-card[hidden]{display:none}
+  #focus-card .fc-top{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    font-size:10.5px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--dim);
+  }
+  #focus-card .fc-tier{
+    font-size:10px; letter-spacing:.1em; color:var(--bad); opacity:0;
+    transition:opacity .2s ease;
+  }
+  #focus-card .fc-tier.on{opacity:1}
+  #focus-clock{
+    font-family:var(--mono); font-size:34px; line-height:1.1; font-weight:600;
+    letter-spacing:.02em; margin:5px 0 7px;
+  }
+  #focus-card .fc-bar{height:4px; border-radius:3px; background:rgba(255,255,255,.09); overflow:hidden}
+  #focus-card .fc-bar i{display:block; height:100%; width:0%; background:var(--accent);
+    transition:width .9s linear, background .25s ease}
+  #focus-card .fc-foot{
+    display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+    margin-top:8px; font-size:11.5px; color:var(--dim);
+  }
+  #focus-state{font-weight:600; color:var(--ink)}
+  #focus-meta{font-size:11px; text-align:right; line-height:1.45}
+  #focus-end{
+    margin-top:9px; width:100%; padding:7px 10px; border-radius:9px; cursor:pointer;
+    font:inherit; font-size:11.5px; font-weight:600; letter-spacing:.04em;
+    color:var(--ink); background:rgba(255,255,255,.06); border:1px solid var(--line);
+  }
+  #focus-end:hover{background:rgba(255,255,255,.11)}
+  /* the tint. Amber at tier 1, deeper at 2, and a slow red pulse at 3 */
+  #focus-card.drift{border-color:rgba(255,196,107,.75); background:rgba(44,32,10,.82);
+    box-shadow:0 18px 50px rgba(0,0,0,.5), 0 0 26px rgba(255,196,107,.28)}
+  #focus-card.drift #focus-state{color:var(--warn)}
+  #focus-card.drift #focus-clock{color:#ffe4b8}
+  #focus-card.drift.t2{border-color:rgba(255,150,90,.85); background:rgba(56,26,8,.85)}
+  #focus-card.drift.t3{border-color:rgba(255,120,120,.95); background:rgba(62,12,16,.88);
+    animation:focus-nag 1.9s ease-in-out infinite}
+  @keyframes focus-nag{
+    0%,100%{box-shadow:0 18px 50px rgba(0,0,0,.5), 0 0 22px rgba(255,110,110,.3)}
+    50%{box-shadow:0 18px 50px rgba(0,0,0,.5), 0 0 40px rgba(255,110,110,.55)}
+  }
+  #focus-card.ended #focus-clock{color:var(--ok)}
+  #focus-card.blind{border-style:dashed}
+  #focus-card.blind #focus-state{color:var(--warn)}
+  #focus-btn.on{background:rgba(110,231,255,.16); border-color:rgba(110,231,255,.5); color:var(--accent)}
+  #focus-btn.drift{background:rgba(255,196,107,.18); border-color:rgba(255,196,107,.6); color:var(--warn)}
+  @media (max-width:720px){ #focus-card{width:186px; padding:10px 11px} #focus-clock{font-size:27px} }
+
+  /* the frame he was actually shown, so you can check it yourself */
+  #a-frame{display:flex; gap:11px; align-items:center; padding:0 16px 12px}
+  #a-frame[hidden]{display:none}
+  #frame-shot{
+    width:132px; height:auto; max-height:84px; object-fit:cover; border-radius:8px;
+    border:1px solid var(--line); background:#000; flex:0 0 auto;
+  }
+  #frame-meta{font-family:var(--mono); font-size:10.5px; color:var(--dimmer); line-height:1.6}
+  #q{
+    flex:1; background:none; border:0; outline:0; color:var(--ink); font-size:14px;
+    font-family:var(--font); padding:7px 0; min-width:0;
+  }
+  #q::placeholder{color:var(--dimmer)}
+  #send{
+    flex:0 0 auto; border:1px solid rgba(110,231,255,.3); background:rgba(110,231,255,.1);
+    color:var(--accent); font-family:var(--font); font-size:12.5px; font-weight:600; letter-spacing:.04em;
+    padding:9px 18px; border-radius:999px; cursor:pointer; transition:.18s;
+  }
+  #send:hover:not(:disabled){background:rgba(110,231,255,.2)}
+  #send:disabled{opacity:.45; cursor:progress}
+
+  /* ---------- boot / error ---------- */
+  #boot{
+    position:fixed; inset:0; z-index:20; display:grid; place-content:center; gap:14px; text-align:center;
+    background:radial-gradient(60% 50% at 50% 50%, #070b18 0%, #03040a 100%);
+    transition:opacity .7s ease; padding:24px;
+  }
+  #boot.gone{opacity:0; pointer-events:none}
+  #boot .mark{font-size:12px; letter-spacing:.3em; text-transform:uppercase; color:var(--accent)}
+  #boot .msg{font-size:13px; color:var(--dim); max-width:520px; line-height:1.6}
+  #boot .orb{
+    width:52px;height:52px;margin:0 auto 6px;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%, #9df1ff, #2b6cff 55%, #3a1b7a);
+    box-shadow:0 0 42px rgba(110,231,255,.5); animation:pulse 2.6s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{transform:scale(1);opacity:.92}50%{transform:scale(1.09);opacity:1}}
+  #boot code{font-family:var(--mono); font-size:12px; color:var(--warn); background:rgba(255,196,107,.08);
+    border:1px solid rgba(255,196,107,.2); border-radius:6px; padding:2px 6px}
+  .spin{display:inline-block; animation:spin 3.4s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  @media (max-width:720px){
+    #voice-status{align-self:flex-start}
+    #voice-detail{max-width:26ch}
+    #hud{max-width:none; right:18px; top:12px; left:12px; padding:11px 13px}
+    #legend{display:none}
+    #hint{display:none}
+    #ask-wrap{bottom:14px; width:calc(100vw - 24px)}
+    #stage{inset:0}
+  }
+</style>
+</head>
+<body>
+
+<div id="stage"></div>
+<div id="grade"></div>
+
+<!-- HUD -->
+<div id="hud">
+  <h1>Alfred <em>&middot;</em> Knowledge Galaxy</h1>
+  <p id="stats">booting&hellip;</p>
+  <div id="status"><span class="dot"></span><span id="status-text">starting renderer</span></div>
+  <div id="brain-chip" title="the model answering you">
+    <span class="b-dot"></span><span>brain</span><b id="brain-label">&mdash;</b><em class="b-temp" id="brain-temp" hidden>until restart</em>
+  </div>
+  <div id="legend"></div>
+  <div id="hint">
+    drag to orbit &middot; scroll to zoom &middot; click a star for its note &middot; <kbd>/</kbd> to ask
+    &middot; say &ldquo;switch to fable&nbsp;5.1&rdquo; for another brain
+    &middot; say &ldquo;thirty minutes on this&rdquo; and he will watch you work
+  </div>
+  <div id="key-note" hidden></div>
+</div>
+
+<!-- side panel -->
+<aside id="panel" aria-hidden="true" aria-label="Note detail">
+  <button id="panel-close" title="Close (Esc)" aria-label="Close">&#10005;</button>
+  <div id="panel-head">
+    <h2 id="panel-label">&nbsp;</h2>
+    <div id="panel-group"></div>
+  </div>
+  <div id="panel-body">
+    <div class="p-section" style="margin-top:0">
+      <div class="p-title">Excerpt</div>
+      <p id="panel-excerpt"></p>
+    </div>
+    <div class="p-section">
+      <div class="p-title" id="neigh-title">Connected notes</div>
+      <div id="panel-neighbours"></div>
+    </div>
+    <div id="panel-meta"></div>
+  </div>
+</aside>
+
+<!-- ask bar -->
+<div id="ask-wrap">
+  <!-- who does the machine think is talking -->
+  <div id="voice-status" data-state="idle">
+    <span class="vs-dot"></span>
+    <span id="voice-text">idle</span>
+    <span id="voice-detail"></span>
+  </div>
+  <div id="answer" hidden>
+    <div class="a-head"><span class="who" id="a-who">Alfred</span><span id="a-model"></span>
+      <button id="a-close" title="Dismiss" aria-label="Dismiss">&#10005;</button></div>
+    <div id="answer-text"></div>
+    <div id="a-frame" hidden>
+      <img id="frame-shot" alt="the frame of your screen Alfred was shown">
+      <span id="frame-meta"></span>
+    </div>
+    <div id="answer-sources"></div>
+    <div class="a-foot" id="a-foot"></div>
+  </div>
+  <form id="ask-form" autocomplete="off">
+    <span class="sig"></span>
+    <button id="mic" type="button" aria-pressed="false" aria-label="Start listening"
+            title="Talk to your notes (click to start, click again to stop)">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+        <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v5.5A3.5 3.5 0 0 0 12 15z"
+              fill="currentColor"/>
+        <path d="M6.5 11.5a.9.9 0 0 1 1.8 0 3.7 3.7 0 0 0 7.4 0 .9.9 0 0 1 1.8 0 5.5 5.5 0 0 1-4.6 5.4v2.2h2.2a.9.9 0 0 1 0 1.8H9.9a.9.9 0 0 1 0-1.8h1.2v-2.2a5.5 5.5 0 0 1-4.6-5.4z"
+              fill="currentColor"/>
+      </svg>
+    </button>
+    <input id="q" type="text" placeholder="Ask your notes&hellip;" aria-label="Ask your notes" maxlength="500">
+    <button id="sight" type="button" aria-pressed="false" aria-label="Share your screen"
+          title="Share your screen so Alfred can see it (click again to stop)">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+        <rect x="2.5" y="4.5" width="19" height="13" rx="2" fill="none" stroke="currentColor"
+              stroke-width="1.7"/>
+        <path d="M9 20.5h6" fill="none" stroke="currentColor" stroke-width="1.7"
+              stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="focus-btn" type="button" aria-pressed="false" aria-label="Start a focus session"
+            title="Focus session: watch where you are and call out drift (click again to end)">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+        <circle cx="12" cy="13" r="7.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M12 9.6V13l2.6 1.7" fill="none" stroke="currentColor" stroke-width="1.7"
+              stroke-linecap="round"/>
+        <path d="M9.4 3.2h5.2" fill="none" stroke="currentColor" stroke-width="1.7"
+              stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="speak-toggle" type="button" aria-pressed="true"
+            aria-label="Spoken answers" title="Spoken answers on (click to silence)">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+        <path d="M4 9.5h3.2L11.5 6v12L7.2 14.5H4z" fill="currentColor"/>
+        <path class="wave" d="M14.8 8.6a4.6 4.6 0 0 1 0 6.8" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round"/>
+        <path class="wave" d="M17.2 6.2a7.8 7.8 0 0 1 0 11.6" fill="none" stroke="currentColor"
+              stroke-width="1.7" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="send" type="submit">Ask</button>
+  </form>
+</div>
+
+<!-- focus sessions: the countdown lives on the SERVER, so this card is only ever a
+     view of it. It shows numbers and states, never an app or a tab: those are compared
+     and thrown away inside the reader, and there is no field here to put one in. -->
+<div id="focus-card" hidden>
+  <div class="fc-top">
+    <span id="focus-phase">focus</span>
+    <span class="fc-tier" id="focus-tier"></span>
+  </div>
+  <div id="focus-clock">--:--</div>
+  <div class="fc-bar"><i id="focus-fill"></i></div>
+  <div class="fc-foot">
+    <span id="focus-state">on target</span>
+    <span id="focus-meta"></span>
+  </div>
+  <button id="focus-end" type="button">End the session</button>
+</div>
+
+<!-- the unmistakable part: while a share is live this ring is around everything -->
+<div id="sight-ring"></div>
+<div id="sight-badge" hidden>
+  <span class="rec"></span>
+  <span id="sight-badge-text">screen share off</span>
+  <span class="sub" id="sight-badge-sub"></span>
+</div>
+
+<!-- boot overlay -->
+<div id="boot">
+  <div class="orb"></div>
+  <div class="mark">Alfred</div>
+  <div class="msg" id="boot-msg">Igniting the galaxy&hellip;</div>
+</div>
+
+<script src="graph-data.js"></script>
+<script type="module">
+/* ============================================================================
+   Alfred - knowledge galaxy viewer
+   No npm, no build step, no framework. Everything below is plain ES modules +
+   the 3d-force-graph bundle from a CDN.
+   ========================================================================== */
+
+const CFG = {
+  // Pinned on purpose. The 3d-force-graph bundle is built against three.js r183
+  // and reuses window.THREE when it is already defined, so we hand it that exact
+  // revision. Three is loaded first, and only then the bundle.
+  //   three.module.min.js imports ./three.core.min.js - a plain relative import,
+  //   so no import map is involved and the CDN serves both files.
+  // Each list is tried in order; ./vendor/* is an optional offline copy created
+  // by tools/vendor.py for networks that cannot reach a CDN at all.
+  three: [
+    'https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.min.js',
+    './vendor/three.module.min.js'
+  ],
+  graph: [
+    'https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.0/dist/3d-force-graph.min.js',
+    'https://unpkg.com/3d-force-graph@1.80.0/dist/3d-force-graph.min.js',
+    './vendor/3d-force-graph.min.js'
+  ],
+  idleDelay: 7000,       // ms of no interaction before the slow drift resumes
+  flyMs: 1300,
+  haloScale: 7.2,
+  nodeRelSize: 2.1
+};
+
+/* ===========================================================================
+   VOICE - speaking and listening using only what the browser already has.
+   No paid services anywhere: Web Speech API (speechSynthesis) for talking and
+   webkitSpeechRecognition for listening.
+   =========================================================================== */
+
+// The wait, in milliseconds, after the last recognised word before we treat the
+// thought as finished. Speech recognition finalises a phrase at every pause and
+// people pause mid-sentence, so fragments are buffered and this window stitches
+// them back together. THIS IS THE ONLY PLACE THE WAIT IS DEFINED.
+const FINISH_MS = 900;
+
+// Words that must not wait for the finish window - they act the moment they are heard.
+const INTERRUPT_WORDS = ['stop', 'wait', 'hold on', 'cancel', 'quiet', 'never mind', 'shut up'];
+
+// Listening language. Indian English suits this accent and the Hindi words in these
+// notes; set it to 'en-GB' or 'en-US' if you would rather.
+const RECOGNITION_LANG = 'en-IN';
+
+// Spoken answers prefer a British English voice when the system has one, then any
+// English voice, then whatever the system offers.
+const VOICE_LANGS = [/en[-_]GB/i, /en[-_]UK/i, /^en\b/i];
+const VOICE_NAMES = /daniel|serena|kate|arthur|sonia|libby|george|oliver|ryan|amelie|british|uk english/i;
+
+// ?mute=1 silences the whole tab. Read once here and enforced inside speak(),
+// so nothing can route around it.
+const MUTED_BY_URL = /(?:^|[?&])mute=1(?:&|$)/.test(window.location.search);
+
+// ---------------------------------------------------------------------------
+// SIGHT - pointing at your own screen.
+//
+// The whole feature is built so it cannot lie to you:
+//
+// * the frame is taken INSIDE the ask path, from the live track, at the moment the
+// question is asked. No frame is ever stored, and no frame from an earlier
+// question can be reused - there is nowhere for one to live.
+// * the media type sent is the one the browser actually produced, read back off
+// the data URL, never the one we asked for. (A canvas asked for image/jpeg can
+// hand back image/png on a browser with no JPEG encoder; /see checks the bytes
+// against the claim and says so plainly if they disagree.)
+// * if the share has ended, nothing is captured and nothing is sent: he says the
+// share is over instead of answering from a picture he no longer has.
+// ---------------------------------------------------------------------------
+const SIGHT_JPEG_QUALITY = 0.85;         // canvas.toDataURL quality for the frame
+const SIGHT_MAX_EDGE = 2560;             // longest edge sent to the model, in pixels
+const SIGHT_FRAME_TIMEOUT_MS = 2500;     // how long one frame may take before we say so
+const SIGHT_ENDED_WINDOW_MS = 90000;     // "the share ended" is said for this long after
+
+// A question that is plainly pointing at the screen. Used ONLY when nothing is being
+// shared - while a share is live, EVERY question is a question about the screen, so no
+// guessing is needed there. Deliberately narrow: it must never steal a question about
+// the notes ("what do my notes say about the error in the code?" stays a notes question),
+// so it looks for words that point at a screen in front of us, not for screen-ish topics.
+const SCREEN_QUESTION_RE = new RegExp(
+  '\\b(?:my screen|the screen|this screen|your screen|screen share|screensharing|' +
+  'monitor|what am i looking at|what am i seeing|what do you see|can you see|do you see|' +
+  'look at (?:this|that|my|the)|see (?:this|that)|read (?:this|that)|' +
+  'on (?:my|the) screen|on screen|this page|this window|this tab|this chart|this graph|' +
+  'this table|this dialog|this error|this button)\\b', 'i');
+
+// ---------------------------------------------------------------------------
+// CAPTURES - a new note being born in the running galaxy.
+//
+// addCaptureNode() puts a star that arrived mid-session into the same data the
+// boot-time nodes live in: NODES, byIndex, adj, linkObjs and the engine's graph.
+// The links come from the server, computed by build.py's own rules (a [[wikilink]]
+// or a mention of another note's title), so the live star is wired exactly like one
+// that was there at boot - and a rebuild writes the same edges.
+//
+// It is born at the position of the existing note it is most related to, glows
+// briefly, and only then does the camera fly to it.
+function nextFreeColour(){
+  const used = new Set(Object.values(COLORS));
+  const free = PALETTE.find(c => !used.has(c));
+  if (free) return free;
+  return PALETTE[Object.keys(COLORS).length % PALETTE.length];
+}
+
+function isRemember(text){
+  return REMEMBER_TRIGGER.test(String(text == null ? '' : text));
+}
+
+function thoughtOf(sentence){
+  return String(sentence == null ? '' : sentence).replace(REMEMBER_TRIGGER, '').trim();
+}
+
+// ---------------------------------------------------------------------------
+// the share itself
+// ---------------------------------------------------------------------------
+let shareStream = null;        // the live MediaStream, held for as long as you share
+let shareTrack = null;         // its video track
+let shareState = 'off';        // 'off' | 'live' | 'ended'
+let shareEndedAt = 0;          // when it ended, for the "the share ended" window
+let sightLines = {};           // the character's own lines, sent by /health (never hardcoded here)
+let brainCatalog = [];         // the families he can wear, sent by /health - never hardcoded here
+let lastFrameSent = null;      // the frame the last SCREEN answer used - shown, never reused
+
+function nav(){
+  // the browser's navigator, or the window's - whichever this scope can see
+  if (typeof navigator !== 'undefined' && navigator) return navigator;
+  if (typeof window !== 'undefined' && window && window.navigator) return window.navigator;
+  return null;
+}
+function sightSupported(){
+  const n = nav();
+  return !!(n && n.mediaDevices && n.mediaDevices.getDisplayMedia);
+}
+function sightTrackLive(){
+  return !!(shareTrack && shareTrack.readyState === 'live');
+}
+function sightIsSharing(){
+  return shareState === 'live' && sightTrackLive();
+}
+function screenQuestion(text){
+  return SCREEN_QUESTION_RE.test(String(text || ''));
+}
+
+function paintSight(){
+  const live = shareState === 'live';
+  const ring = $('sight-ring'), badge = $('sight-badge'), btn = $('sight');
+  if (ring) ring.classList[live ? 'add' : 'remove']('on');
+  if (badge){
+    badge.hidden = shareState === 'off';
+    badge.className = shareState === 'ended' ? 'ended' : '';
+    if (!badge.hidden) badge.classList.add('on');
+    const text = $('sight-badge-text'), sub = $('sight-badge-sub');
+    if (text) text.textContent = live ? 'screen live - I can see your screen' : 'screen share ended';
+    if (sub) sub.textContent = live
+      ? 'everything you ask is about the screen'
+      : 'nothing is being looked at';
+  }
+  if (btn){
+    btn.setAttribute('aria-pressed', live ? 'true' : 'false');
+    if (shareState === 'ended') btn.classList.add('ended'); else btn.classList.remove('ended');
+    btn.title = live ? 'Stop sharing your screen' : 'Share your screen so Alfred can see it';
+  }
+  if (shareState === 'live') input.placeholder = 'Ask about what is on your screen\u2026';
+  else input.placeholder = 'Ask your notes\u2026';
+}
+
+/* Only speak if nothing is being said: a share ending must never cut an answer in half. */
+function announceSight(line){
+  if (!line) return false;
+  try { if (synth && synth.speaking) return false; } catch (err){ /* no engine: speak() reports it */ }
+  speak(line);
+  return true;
+}
+
+async function startSharing(){
+  if (!sightSupported()){
+    setVoiceStatus('error', 'this browser cannot share a screen');
+    return {ok: false, why: 'unsupported'};
+  }
+  if (sightIsSharing()) return {ok: true, already: true};
+  try {
+    const stream = await nav().mediaDevices.getDisplayMedia({
+      video: {frameRate: 30}, audio: false, preferCurrentTab: false, selfBrowserSurface: 'include'
+    });
+    const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    if (!track) throw new Error('the share came back without a picture');
+    shareStream = stream;
+    shareTrack = track;
+    shareState = 'live';
+    // the browser's own "Stop sharing" bar ends the track: that is the share ending,
+    // and it is treated exactly like pressing our button
+    track.onended = () => endShare();
+    if ('oninactive' in stream) stream.oninactive = () => endShare();
+    paintSight();
+    setVoiceStatus('idle', 'sharing your screen');
+    announceSight(sightLines.started);
+    return {ok: true, track: track.label || 'screen'};
+  } catch (err){
+    shareStream = null; shareTrack = null; shareState = 'off';
+    paintSight();
+    const name = (err && err.name) || 'error';
+    setVoiceStatus(name === 'NotAllowedError' ? 'idle' : 'error',
+                   name === 'NotAllowedError' ? 'screen share cancelled' : 'screen share failed: ' + name);
+    return {ok: false, why: name};
+  }
+}
+
+function endShare(){
+  if (shareState !== 'live') return false;
+  const track = shareTrack, stream = shareStream;
+  shareTrack = null; shareStream = null;
+  if (track){ try { track.onended = null; track.stop(); } catch (err){} }
+  if (stream){ try { stream.getTracks().forEach(t => { try { t.stop(); } catch (e){} }); } catch (err){} }
+  shareState = 'ended';
+  shareEndedAt = performance.now();
+  paintSight();
+  setVoiceStatus('idle', 'screen share ended');
+  announceSight(sightLines.ended);
+  return true;
+}
+
+function stopSharing(){ return endShare(); }
+
+// ---------------------------------------------------------------------------
+// one frame, at the moment you ask
+// ---------------------------------------------------------------------------
+function waitForVideoFrame(video){
+  const ready = () => (video.videoWidth || 0) > 0 && (video.readyState == null || video.readyState >= 2);
+  return new Promise(resolve => {
+    if (ready()) return resolve(true);
+    let settled = false;
+    const done = (v) => { if (!settled){ settled = true; resolve(v); } };
+    const started = performance.now();
+    const tick = () => {
+      if (settled) return;
+      if (ready()) return done(true);
+      if (performance.now() - started >= SIGHT_FRAME_TIMEOUT_MS) return done(false);
+      requestAnimationFrame(tick);
+    };
+    // requestVideoFrameCallback hands us the frame the compositor just presented -
+    // the freshest one there is - and the rAF poll is the fallback for engines (and
+    // for the headless harness) that do not have it.
+    if (typeof video.requestVideoFrameCallback === 'function'){
+      video.requestVideoFrameCallback(() => done(ready()));
+    }
+    requestAnimationFrame(tick);
+  });
+}
+
+async function grabFrame(){
+  if (!sightIsSharing()) return {ok: false, why: 'not_live'};
+  if (typeof document.createElement !== 'function') return {ok: false, why: 'no_dom'};
+  const video = document.createElement('video');
+  try {
+    video.muted = true;
+    if ('playsInline' in video) video.playsInline = true;
+    video.srcObject = shareStream;
+    if (typeof video.play === 'function'){ try { await video.play(); } catch (err){} }
+    const got = await waitForVideoFrame(video);
+    if (!got) return {ok: false, why: 'no_frame'};
+    const vw = video.videoWidth || 0, vh = video.videoHeight || 0;
+    if (!vw || !vh) return {ok: false, why: 'no_size'};
+    const scale = Math.min(1, SIGHT_MAX_EDGE / Math.max(vw, vh));
+    const width = Math.max(1, Math.round(vw * scale));
+    const height = Math.max(1, Math.round(vh * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext && canvas.getContext('2d');
+    if (!ctx) return {ok: false, why: 'no_canvas'};
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(video, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', SIGHT_JPEG_QUALITY);
+    if (!dataUrl || dataUrl.indexOf('data:') !== 0) return {ok: false, why: 'no_encode'};
+    // what the browser ACTUALLY produced, read back rather than assumed: this is the
+    // media type that goes on the wire, so it can never disagree with the bytes
+    const semi = dataUrl.indexOf(';'), comma = dataUrl.indexOf(',');
+    const mediaType = dataUrl.slice(5, semi > 0 ? semi : comma).toLowerCase();
+    const b64 = dataUrl.slice(comma + 1);
+    return {ok: true, frame: {
+      dataUrl, mediaType, width, height,
+      source: {width: vw, height: vh},
+      bytes: Math.floor(b64.length * 0.75),
+      capturedAt: Date.now()
+    }};
+  } catch (err){
+    return {ok: false, why: 'exception', error: String(err && err.message || err)};
+  } finally {
+    try { video.srcObject = null; } catch (err){}       // nothing keeps the stream
+    try { if (typeof video.pause === 'function') video.pause(); } catch (err){}
+  }
+}
+
+/* Put a brand new note into the live graph. Returns where it was born. */
+function addCaptureNode(entry){
+  const raw = (entry && entry.node) || {};
+  const id = (raw.index != null && !nodesById.has(raw.index)) ? raw.index : NODES.length;
+  const group = raw.group || 'captures';
+  const node = {
+    id, index: (raw.index != null ? raw.index : id),
+    label: raw.label || 'Untitled capture', group,
+    excerpt: raw.excerpt || '', path: raw.path || '',
+    words: raw.words || 0, chars: raw.chars || 0, degree: 0,
+    wikilinks: raw.wikilinks || [], mentions: raw.mentions || []
+  };
+  // its birthplace: the note it is most related to (a capture that relates to
+  // nothing is dropped at the middle of the galaxy rather than given a fake home)
+  const anchor = (entry && entry.anchor && nodesById.has(entry.anchor.index))
+    ? nodesById.get(entry.anchor.index) : null;
+  const at = anchor
+    ? {x: anchor.x || 0, y: anchor.y || 0, z: anchor.z || 0}
+    : {x: 0, y: 0, z: 0};
+  node.x = at.x; node.y = at.y; node.z = at.z;
+  node.vx = node.vy = node.vz = 0;
+  // Held still while it is born: the new star AND the note it was born beside are
+  // pinned for the length of the glow and the camera flight (submitCapture releases
+  // both). Without this the layout re-heats the moment a node is added and the two
+  // drift apart on the very next frame, which reads as the star being thrown in at
+  // random rather than arriving at its parent.
+  node.fx = at.x; node.fy = at.y; node.fz = at.z;
+  const held = anchor ? {node: anchor, x: anchor.x, y: anchor.y, z: anchor.z} : null;
+  if (anchor){ anchor.fx = anchor.x || 0; anchor.fy = anchor.y || 0; anchor.fz = anchor.z || 0; }
+
+  // a new folder gets its own colour, but existing groups keep theirs: re-running
+  // groupColors() would repaint the whole galaxy because 'captures' sorts first
+  if (!COLORS[group]) COLORS[group] = nextFreeColour();
+
+  NODES.push(node);
+  nodesById.set(node.id, node);
+  byIndex.set(node.index, node);
+  adj.set(node.id, []);
+
+  (entry && entry.links || []).forEach(l => {
+    const a = nodesById.get(typeof l.source === 'object' ? l.source.id : l.source);
+    const b = nodesById.get(typeof l.target === 'object' ? l.target.id : l.target);
+    if (!a || !b || a === b) return;
+    if ((adj.get(a.id) || []).some(e => e.node === b)) return;   // build.py writes one edge per pair
+    const link = {source: a, target: b, kind: l.kind || 'mention', weight: l.weight || 1};
+    linkObjs.push(link);
+    LINKS.push({source: a.id, target: b.id, kind: link.kind, weight: link.weight});
+    adj.get(a.id).push({node: b, link});
+    adj.get(b.id).push({node: a, link});
+    a.degree = (a.degree || 0) + 1;
+    b.degree = (b.degree || 0) + 1;
+  });
+  node.degree = (adj.get(node.id) || []).length;
+
+  if (Graph) Graph.graphData({nodes: NODES, links: linkObjs});
+  // pinned every time, in case handing the array to the engine touched it
+  node.fx = at.x; node.fy = at.y; node.fz = at.z;
+  if (anchor){ anchor.fx = anchor.x || 0; anchor.fy = anchor.y || 0; anchor.fz = anchor.z || 0; }
+  // The birth itself, recorded in the frame it happens: this is what "born at the
+  // position of its most related note" means, measured before the layout moves
+  // anything. Read the two positions together and they are the same point.
+  lastSpawn = {
+    id: node.id, label: node.label, group: node.group,
+    anchorId: anchor ? anchor.id : null, anchorLabel: anchor ? anchor.label : null,
+    anchorPos: anchor ? {x: anchor.x || 0, y: anchor.y || 0, z: anchor.z || 0} : null,
+    spawnPos: {x: node.x, y: node.y, z: node.z},
+    distance: anchor ? Math.hypot(node.x - (anchor.x || 0), node.y - (anchor.y || 0),
+                                  node.z - (anchor.z || 0)) : null,
+    links: (entry && entry.links ? entry.links.length : 0),
+    at: performance.now()
+  };
+  repaintNodes();
+  buildLegend();
+  updateStats();
+  return {node, anchor, at, id, held};
+}
+
+/* The birth: a short glow, and only afterwards does the camera go to it. Anything
+   the renderer cannot do (no shared three.js, no halo sprite) resolves at once -
+   the note is still added, still linked, still flown to. */
+function birthPulse(born){
+  const node = born && born.node;
+  const ms = CAPTURE_PULSE_MS;
+  if (!node || !Graph || !THREE) return Promise.resolve({ms: 0, ring: false, endedAt: performance.now()});
+  const sprite = halos.get(node.id);
+  const r0 = sphereR(node) * CFG.haloScale;
+  let ring = null, ringMat = null;
+  try {
+    ringMat = new THREE.SpriteMaterial({
+      map: haloTex, color: hot(colorOf(node)), transparent: true, opacity: .9,
+      blending: THREE.AdditiveBlending, depthWrite: false });
+    ring = new THREE.Sprite(ringMat);
+    ring.position.set(node.x || 0, node.y || 0, node.z || 0);
+    ring.scale.setScalar(r0 * 0.6);
+    Graph.scene().add(ring);
+  } catch (err){ ring = null; }
+
+  const t0 = performance.now();
+  return new Promise(resolve => {
+    const step = () => {
+      const p = Math.min(1, (performance.now() - t0) / ms);
+      const flare = Math.sin(Math.PI * p);                  // 0 -> 1 -> 0
+      if (sprite){
+        sprite.scale.setScalar(r0 * (1 + 2.6 * flare));
+        sprite.material.opacity = Math.min(0.97, 0.55 + 0.45 * flare);
+      }
+      if (ring){
+        ring.scale.setScalar(r0 * (0.6 + 5.4 * p));
+        ringMat.opacity = 0.9 * (1 - p) * (1 - p);
+      }
+      if (p < 1){ requestAnimationFrame(step); return; }
+      if (ring){
+        try { Graph.scene().remove(ring); } catch (err){}
+        ring = null;
+      }
+      repaintNodes();                        // leave the halo as the style says
+      resolve({ms, ring: true, node: node.id, endedAt: performance.now()});
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// PROVENANCE - making the galaxy show where an answer came from.
+//
+// Up to this many supporting notes and the camera flies to the best one: the
+// answer came from one note (or a couple) and that note can be pointed at.
+// Four or more and the camera does not move at all - the answer came from a
+// cluster, and flying to one arbitrary note out of six would be a lie about
+// where it came from. The cluster is lit instead, exactly as it is.
+const PROVENANCE_FLY_MAX = 3;
+
+// The spoken answer stays short: past this many characters only the first
+// sentences are read out. The note itself is never read - it is on screen, and
+// reading it aloud is both longer and useless.
+const SPEAK_MAX_CHARS = 480;
+
+/* ---------------------------------------------------------------------------
+   GROWING THE BRAIN - anything that starts with the trigger below is a note, not
+   a question. It is POSTed to /remember (see the captures section of server.py),
+   which writes a real markdown file into notes/captures/ and indexes it straight
+   away, so the very next question can be answered from it.
+   --------------------------------------------------------------------------- */
+const REMEMBER_TRIGGER = /^\s*remember\b[:,]?\s*(?:that\b[:,]?\s*)?/i;
+
+// How long a newly filed star glows before the camera goes to it: born at its most
+// related note, a brief pulse, then the flight. THIS IS THE ONLY PLACE IT IS DEFINED.
+const CAPTURE_PULSE_MS = 1100;
+
+const $ = (id) => document.getElementById(id);
+const stage = $('stage');
+const boot = $('boot');
+const bootMsg = $('boot-msg');
+
+/* ---------------------------------------------------------------- utilities */
+const PALETTE = ['#5ee7ff','#a98bff','#ffb45c','#5cffc0','#ff6ea9','#d4ff5c',
+                 '#7db8ff','#ff8f6e','#4fd8c8','#ffd76e','#8f9dff','#ff7bd5'];
+
+function groupColors(nodes){
+  const groups = [...new Set(nodes.map(n => n.group || 'notes'))].sort();
+  const map = {};
+  groups.forEach((g,i) => map[g] = PALETTE[i % PALETTE.length]);
+  return map;
+}
+function hexToRgb(hex){
+  const h = hex.replace('#','');
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+function mix(hex, target, t){
+  const a = hexToRgb(hex), b = hexToRgb(target);
+  return '#' + a.map((v,i)=> Math.round(v + (b[i]-v)*t).toString(16).padStart(2,'0')).join('');
+}
+const dim = (hex) => mix(hex, '#1b2233', 0.72);   // dimmed = pulled toward the void
+const hot = (hex) => mix(hex, '#ffffff', 0.42);   // lit = pulled toward white
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function loadScript(urls){
+  return new Promise((resolve, reject) => {
+    const tried = [];
+    let i = 0;
+    const next = () => {
+      if (i >= urls.length) {
+        const err = new Error('could not load the 3D engine from any source');
+        err.tried = tried;
+        return reject(err);
+      }
+      const url = urls[i++];
+      tried.push(url);
+      const s = document.createElement('script');
+      s.src = url;
+      s.async = false;
+      s.onload = () => { s.dataset.src = url; resolve(url); };
+      s.onerror = () => {
+        console.warn('[alfred] script not available:', url);
+        s.remove();
+        next();
+      };
+      document.head.appendChild(s);
+    };
+    next();
+  });
+}
+
+async function loadThree(){
+  for (const url of CFG.three){
+    try {
+      const mod = await import(url);
+      if (mod && mod.REVISION) return mod;
+    } catch (err){
+      console.warn('[alfred] three.js not available at', url, '-', err.message);
+    }
+  }
+  return null;
+}
+
+/* --------------------------------------------------------------- graph data */
+const GRAPH = (typeof window.GRAPH !== 'undefined' && window.GRAPH) || {nodes:[], links:[]};
+const NODES = GRAPH.nodes || [];
+const LINKS = GRAPH.links || [];
+
+if (!NODES.length){
+  boot.classList.remove('gone');
+  bootMsg.innerHTML = 'No notes indexed yet. Run <code>python3 build.py</code> to write ' +
+                      '<code>viewer/graph-data.js</code>, then reload.';
+  $('stats').textContent = 'empty galaxy';
+  throw new Error('no graph data');
+}
+
+// links arrive as indexes -> resolve to node objects once, keep both views
+const byIndex = new Map(NODES.map((n,i) => [n.index != null ? n.index : i, n]));
+const linkObjs = [];
+const adj = new Map(NODES.map(n => [n.id, []]));
+LINKS.forEach(l => {
+  const s = byIndex.get(l.source), t = byIndex.get(l.target);
+  if (!s || !t) return;
+  const link = {source: s, target: t, kind: l.kind || 'link', weight: l.weight || 1};
+  linkObjs.push(link);
+  adj.get(s.id).push({node: t, link});
+  adj.get(t.id).push({node: s, link});
+});
+const COLORS = groupColors(NODES);
+const nodesById = new Map(NODES.map(n => [n.id, n]));
+
+/* --------------------------------------------------------------- 3d layer */
+let Graph = null, THREE = null, camera = null, controls = null;
+let halos = new Map();          // node id -> halo sprite
+let starfield = null, core = null;
+let camRadius = 420;            // camera distance from the centre, set after layout
+let litIds = new Set(), litPair = new Set();
+let selected = null;            // currently focused node
+let lastFlyTo = null;           // destination of the most recent camera flight
+let hoveredId = null;
+let domainNodes = null;         // set when filtering by group
+let lastSpawn = null;           // the instant a capture was born, before the glow
+
+/* -- sprites are built from tiny canvases so we need no extra assets -------- */
+function radialTexture(stops, size = 128){
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  stops.forEach(([at, color]) => g.addColorStop(at, color));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+function starTexture(){
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(16,16,0,16,16,16);
+  g.addColorStop(0,'rgba(255,255,255,1)');
+  g.addColorStop(0.35,'rgba(255,255,255,.75)');
+  g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(0,0,32,32);
+  return new THREE.CanvasTexture(c);
+}
+
+function makeStarfield(count = 5200){
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+  for (let i = 0; i < count; i++){
+    // uniform shell, so stars never bunch at the poles
+    const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+    const r = 900 + Math.pow(Math.random(), 0.6) * 2600;
+    const s = Math.sqrt(1 - u * u);
+    pos[i*3] = r * s * Math.cos(th);
+    pos[i*3+1] = r * u;
+    pos[i*3+2] = r * s * Math.sin(th);
+    const warm = Math.random();
+    c.setHSL(warm < 0.72 ? 0.58 : (warm < 0.9 ? 0.09 : 0.78), 0.45, 0.72 + Math.random() * 0.25);
+    const k = 0.35 + Math.random() * 0.65;
+    col[i*3] = c.r * k; col[i*3+1] = c.g * k; col[i*3+2] = c.b * k;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 2.1,
+    sizeAttenuation: false,        // pixel-sized: identical on every zoom level
+    map: starTexture(),
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  pts.renderOrder = -2;
+  return pts;
+}
+
+function makeCoreGlow(){
+  const g = new THREE.Group();
+  const tex = radialTexture([[0,'rgba(255,255,255,.85)'],[0.25,'rgba(160,190,255,.35)'],[1,'rgba(0,0,0,0)']], 256);
+  [[0x2b6cff, 640, .16, [0,0,-120]], [0x7a3cff, 900, .12, [140,-90,180]]].forEach(([hex, scale, opacity, p]) => {
+    const mat = new THREE.SpriteMaterial({
+      map: tex, color: hex, transparent: true, opacity,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    const s = new THREE.Sprite(mat);
+    s.scale.set(scale, scale, 1);
+    s.position.set(p[0], p[1], p[2]);
+    s.renderOrder = -1;
+    g.add(s);
+  });
+  return g;
+}
+
+const nodeVal = (n) => 2.6 + Math.min(3.4, (n.words || 40) / 90);
+const sphereR = (n) => CFG.nodeRelSize * Math.cbrt(nodeVal(n));
+const colorOf = (n) => COLORS[n.group] || '#8fa2c0';
+
+function makeHalo(n){
+  const base = colorOf(n);
+  const mat = new THREE.SpriteMaterial({
+    map: haloTex, color: base, transparent: true, opacity: .55,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.setScalar(sphereR(n) * CFG.haloScale);
+  spr.userData.nodeId = n.id;
+  halos.set(n.id, spr);
+  return spr;
+}
+let haloTex = null;
+
+/* -- visual state --------------------------------------------------------- */
+function styleFor(n){
+  const base = colorOf(n);
+  const isSel = selected && n.id === selected.id;
+  const lit = litIds.has(n.id);
+  const filtered = domainNodes && !domainNodes.has(n.id);
+  if (isSel)       return {color:'#ffffff', halo:hot(base), haloOp:.95, scale:1.55};
+  if (lit)         return {color:hot(base), halo:hot(base), haloOp:.8,  scale:1.15};
+  if (filtered)    return {color:dim(base), halo:dim(base), haloOp:.12, scale:.85};
+  return {color:base, halo:base, haloOp:.5, scale:1};
+}
+
+function repaintNodes(){
+  NODES.forEach(n => {
+    const st = styleFor(n);
+    const spr = halos.get(n.id);
+    if (spr){
+      spr.material.color.set(st.halo);
+      spr.material.opacity = st.haloOp;
+      spr.scale.setScalar(sphereR(n) * CFG.haloScale * st.scale);
+    }
+  });
+  if (Graph){
+    Graph.nodeColor(Graph.nodeColor());                      // documented refresh idiom
+    Graph.linkColor(Graph.linkColor());
+    Graph.linkWidth(Graph.linkWidth());
+    Graph.linkDirectionalParticles(Graph.linkDirectionalParticles());
+  }
+}
+function linkIsLit(l){ return litPair.has(l.source.id + '|' + l.target.id) || litPair.has(l.target.id + '|' + l.source.id); }
+
+function setFocus(node){
+  selected = node;
+  domainNodes = null;
+  document.querySelectorAll('.chip.on').forEach(c => c.classList.remove('on'));
+  litIds = new Set([node.id]);
+  litPair = new Set();
+  (adj.get(node.id) || []).forEach(({node:n2, link}) => {
+    litIds.add(n2.id);
+    litPair.add(link.source.id + '|' + link.target.id);
+  });
+  repaintNodes();
+  openPanel(node);
+  flyTo(node);
+}
+function setDomain(group){
+  selected = null;
+  litPair = new Set();
+  if (!group){ domainNodes = null; litIds = new Set(); }
+  else {
+    domainNodes = new Set(NODES.filter(n => n.group === group).map(n => n.id));
+    litIds = new Set(domainNodes);
+  }
+  repaintNodes();
+  closePanel();
+}
+function clearFocus(){
+  selected = null; domainNodes = null; litIds = new Set(); litPair = new Set();
+  document.querySelectorAll('.chip.on').forEach(c => c.classList.remove('on'));
+  repaintNodes();
+  closePanel();
+}
+
+/* -- camera --------------------------------------------------------------- */
+function flyTo(node){
+  if (!Graph) return;
+  flyingUntil = performance.now() + CFG.flyMs + 400;   // hold the drift off
+  markActivity();                                      // and stop it right now
+  // Approach distance scales with the node's own neighbourhood, not with the size
+  // of the whole galaxy - otherwise a click on a small cluster ends up staring at
+  // it from across the map. Falls back to a fraction of the framed radius.
+  const neigh = adj.get(node.id) || [];
+  let scale = 0;
+  neigh.forEach(({node: n2}) => {
+    if (n2.x == null) return;
+    scale += Math.hypot(n2.x - node.x, n2.y - node.y, n2.z - node.z);
+  });
+  scale = neigh.length ? scale / neigh.length : 0;
+  const d = Math.max(70, Math.min(camRadius * 0.5, scale ? scale * 2.1 : camRadius * 0.24));
+
+  const nx = node.x || 0, ny = node.y || 0, nz = node.z || 0;
+  const dist = Math.hypot(nx, ny, nz) || 1;
+  const camPos = {x: nx * (1 + d / dist), y: ny * (1 + d / dist), z: nz * (1 + d / dist)};
+
+  // The side panel covers the right-hand third of the screen. Pan the camera so the
+  // node we just flew to sits in the middle of what is actually visible, instead of
+  // hiding behind the panel.
+  const pan = panelPanOffset(nx, ny, nz, camPos, d);
+  const target = {x: nx + pan.x, y: ny + pan.y, z: nz + pan.z};
+
+  Graph.cameraPosition({x: camPos.x + pan.x, y: camPos.y + pan.y, z: camPos.z + pan.z},
+                       target, CFG.flyMs);
+  if (controls) controls.target.set(target.x, target.y, target.z);
+  // where this flight is headed - handy for tests and for debugging
+  lastFlyTo = {pos: {x: camPos.x + pan.x, y: camPos.y + pan.y, z: camPos.z + pan.z},
+               target: target, node: {x: nx, y: ny, z: nz}, distance: d, at: performance.now()};
+}
+
+function panelPanOffset(nx, ny, nz, camPos, d){
+  const none = {x: 0, y: 0, z: 0};
+  if (!panel || !panel.classList.contains('open')) return none;
+  const viewportW = window.innerWidth || 1;
+  const panelW = panel.getBoundingClientRect().width;
+  const visibleW = Math.max(120, viewportW - panelW);
+  if (panelW <= 0 || visibleW >= viewportW - 1) return none;
+  // how far left of screen centre the node must appear, in pixels
+  const shiftPx = panelW / 2;
+  const screenW = 2 * d * Math.tan((((camera && camera.fov) || 50) * Math.PI / 180) / 2) * (viewportW / (window.innerHeight || 1));
+  const world = (shiftPx / viewportW) * screenW;
+  // camera "right" is cross(up, backward) with up = +Y, so (b_z, 0, -b_x) - moving the
+  // camera that way slides the subject to the left on screen
+  const bx = camPos.x - nx, by = camPos.y - ny, bz = camPos.z - nz;
+  const bl = Math.hypot(bx, by, bz) || 1;
+  const rx = bz / bl, ry = 0, rz = -bx / bl;
+  const rl = Math.hypot(rx, ry, rz) || 1;
+  return {x: (rx / rl) * world, y: (ry / rl) * world, z: (rz / rl) * world};
+}
+function measureGalaxy(){
+  try {
+    const bb = Graph.getGraphBbox();
+    const span = bb ? Math.max(
+      (bb.x[1] - bb.x[0]) || 0, (bb.y[1] - bb.y[0]) || 0, (bb.z[1] - bb.z[0]) || 0) : 0;
+    camRadius = Math.min(1600, Math.max(240, span * 1.55));
+  } catch (err){ camRadius = 420; }
+  return camRadius;
+}
+
+function resetCamera(animate = 1200){
+  if (!Graph) return;
+  Graph.cameraPosition({x: 0, y: camRadius * 0.22, z: camRadius}, {x: 0, y: 0, z: 0}, animate);
+  if (controls) controls.target.set(0, 0, 0);
+}
+
+/* -- idle drift ----------------------------------------------------------- */
+let lastTouch = 0;
+let flyingUntil = 0;
+function markActivity(){
+  lastTouch = performance.now();
+  if (controls && controls.autoRotate) controls.autoRotate = false;
+}
+function tickIdle(){
+  if (!controls) return;
+  // never let the idle drift run while a camera flight is in progress: the two
+  // both write camera.position and the drift wins, which makes a click look dead
+  const busy = performance.now() < flyingUntil;
+  const idle = !busy && performance.now() - lastTouch > CFG.idleDelay;
+  if (idle !== controls.autoRotate) controls.autoRotate = idle;
+  requestAnimationFrame(tickIdle);
+}
+
+/* -- panel ---------------------------------------------------------------- */
+const panel = $('panel');
+function openPanel(node){
+  $('panel-label').textContent = node.label;
+  const c = colorOf(node);
+  $('panel-group').innerHTML = `<i style="background:${c};box-shadow:0 0 10px ${c}"></i>` +
+    `${esc(node.group)} <code>${esc(node.path || '')}</code>`;
+  $('panel-excerpt').textContent = node.excerpt || '(empty note)';
+  const list = $('panel-neighbours');
+  const neigh = (adj.get(node.id) || []).slice().sort((a,b) => a.node.label.localeCompare(b.node.label));
+  $('neigh-title').textContent = `Connected notes (${neigh.length})`;
+  list.innerHTML = '';
+  neigh.forEach(({node:n2, link}) => {
+    const b = document.createElement('button');
+    b.className = 'neigh';
+    b.innerHTML = `<i style="background:${colorOf(n2)}"></i>${esc(n2.label)}` +
+                  `<span class="kind">${link.kind === 'wikilink' ? '[[]]' : 'mentions'}</span>`;
+    b.onclick = () => { setFocus(n2); };
+    list.appendChild(b);
+  });
+  $('panel-meta').innerHTML =
+    `id ${node.id} &middot; index ${node.index} &middot; ${node.words || 0} words &middot; ` +
+    `${node.degree || neigh.length} links<br>${esc(node.path || '')}`;
+  panel.classList.add('open');
+  panel.setAttribute('aria-hidden', 'false');
+}
+function closePanel(){
+  panel.classList.remove('open');
+  panel.setAttribute('aria-hidden', 'true');
+}
+$('panel-close').onclick = () => clearFocus();
+
+/* -- legend --------------------------------------------------------------- */
+function updateStats(){
+  $('stats').textContent = `${NODES.length} notes · ${linkObjs.length} links · ` +
+                           `${Object.keys(COLORS).length} groups`;
+}
+function buildLegend(){
+  const counts = {};
+  NODES.forEach(n => counts[n.group] = (counts[n.group] || 0) + 1);
+  const box = $('legend');
+  box.innerHTML = '';
+  Object.keys(counts).sort().forEach(g => {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    el.innerHTML = `<i style="background:${COLORS[g]};box-shadow:0 0 8px ${COLORS[g]}"></i>${esc(g)} <span class="n">${counts[g]}</span>`;
+    el.onclick = () => {
+      const on = el.classList.contains('on');
+      document.querySelectorAll('.chip.on').forEach(c => c.classList.remove('on'));
+      if (on) clearFocus(); else { el.classList.add('on'); setDomain(g); }
+    };
+    box.appendChild(el);
+  });
+}
+
+/* -- picking: works even when the click lands on a node's glow sprite ------ */
+function nearestNodeToScreen(clientX, clientY, maxPx = 72){
+  if (!THREE || !camera) return null;
+  const rect = Graph.renderer().domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const p = new THREE.Vector3();
+  const tanHalfFov = Math.tan((camera.fov * Math.PI / 180) / 2);
+  let best = null, bestScore = Infinity;
+  NODES.forEach(n => {
+    if (n.x == null) return;
+    p.set(n.x, n.y, n.z);
+    const along = p.clone().sub(ray.ray.origin).dot(ray.ray.direction);
+    if (along <= 0) return;                              // behind the camera
+    const perp = ray.ray.distanceToPoint(p);
+    const offsetPx = (perp / along) * (rect.height / (2 * tanHalfFov));  // true screen distance
+    if (offsetPx > maxPx) return;                        // too far off the cursor
+    const score = along * 0.001 + offsetPx;              // prefer the nearest thing to the cursor
+    if (score < bestScore){ bestScore = score; best = n; }
+  });
+  return best;
+}
+let downPos = null, dragDist = 0;
+stage.addEventListener('pointerdown', (e) => { downPos = [e.clientX, e.clientY]; dragDist = 0; markActivity(); }, true);
+stage.addEventListener('pointermove', (e) => {
+  if (downPos) dragDist = Math.max(dragDist, Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]));
+}, true);
+stage.addEventListener('pointerup', () => { markActivity(); }, true);
+stage.addEventListener('wheel', markActivity, {passive: true});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape'){ if (panel.classList.contains('open')) clearFocus(); else resetCamera(); }
+  if (e.key === '/' && document.activeElement !== $('q')){ e.preventDefault(); $('q').focus(); }
+  markActivity();
+});
+
+/* ------------------------------------------------------------------ boot */
+async function boot3d(){
+  bootMsg.textContent = 'Loading the renderer…';
+  THREE = await loadThree();
+  if (THREE) {
+    // The bundle renders through this same instance. Importing three.js makes it
+    // set window.__THREE__, so the bundle's own bundled copy prints a one-line
+    // "Multiple instances of Three.js" warning on load. It is harmless: the
+    // internal copy is never used once window.THREE exists.
+    window.THREE = THREE;
+  } else {
+    console.warn('[alfred] no three.js available - falling back to the copy inside the bundle');
+  }
+
+  const built = await loadScript(CFG.graph);
+  bootMsg.textContent = 'Building the galaxy…';
+
+  const ForceGraph3D = window.ForceGraph3D;
+  if (typeof ForceGraph3D !== 'function') throw new Error('3d-force-graph did not load');
+
+  if (THREE){
+    haloTex = radialTexture([[0,'rgba(255,255,255,1)'],[0.18,'rgba(255,255,255,.85)'],
+                             [0.45,'rgba(255,255,255,.28)'],[1,'rgba(255,255,255,0)']]);
+  } else {
+    console.warn('[alfred] shared three.js unavailable - the bundle will use its own copy ' +
+                 'and the glow sprites / starfield will be skipped');
+  }
+
+  Graph = new ForceGraph3D(stage, {controlType: 'orbit'})
+    .backgroundColor('#03040a')
+    .showNavInfo(false)
+    .nodeId('id')
+    .nodeRelSize(CFG.nodeRelSize)
+    .nodeVal(nodeVal)
+    .nodeOpacity(1)
+    .nodeResolution(16)
+    .nodeColor(n => styleFor(n).color)
+    .nodeLabel(n => `<b>${esc(n.label)}</b><br><span>${esc(n.group)} &middot; ${(adj.get(n.id)||[]).length} links</span>`)
+    .linkSource('source').linkTarget('target')
+    .linkColor(l => linkIsLit(l) ? '#cdeeff' : '#3d5578')
+    .linkWidth(l => linkIsLit(l) ? 1.35 : 0.35)
+    .linkOpacity(0.45)
+    .linkCurvature(0.12)
+    .linkDirectionalParticles(l => linkIsLit(l) ? 2 : 0)
+    .linkDirectionalParticleWidth(1.5)
+    .linkDirectionalParticleSpeed(0.0065)
+    .linkDirectionalParticleColor(() => '#dff6ff')
+    .warmupTicks(40)
+    .cooldownTicks(220)
+    .cooldownTime(9000)
+    .d3AlphaDecay(0.019)
+    .d3VelocityDecay(0.33)
+    .onNodeClick((n) => { if (dragDist < 6) setFocus(n); })
+    .onBackgroundClick((e) => {
+      // also fires for clicks that land on a node's glow sprite, so fall back to a raycast
+      if (dragDist >= 6) return;
+      const hit = nearestNodeToScreen(e.clientX, e.clientY);
+      if (hit) setFocus(hit); else clearFocus();
+    });
+
+  // settle geometry the library keeps private
+  try {
+    const charge = Graph.d3Force('charge');
+    if (charge && charge.strength) charge.strength(-135);
+    const link = Graph.d3Force('link');
+    if (link && link.distance) link.distance(n => 34 + (n.degree || 0) * 3);
+  } catch (err){ console.warn('[alfred] could not tune forces', err); }
+
+  Graph.graphData({nodes: NODES, links: linkObjs});
+
+  camera = Graph.camera();
+  camera.far = 45000;                      // room for the starfield shell
+  camera.near = 1.5;                        // keeps depth precision sane at that far plane
+  camera.updateProjectionMatrix();
+  camera.position.set(0, 0, 520);
+
+  controls = Graph.controls ? Graph.controls() : null;
+  if (controls){
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.autoRotateSpeed = 0.42;       // the slow idle drift
+    controls.zoomSpeed = 0.8;
+    controls.minDistance = 26;
+    controls.maxDistance = 4200;
+  }
+  lastTouch = performance.now();
+  requestAnimationFrame(tickIdle);
+
+  if (THREE){
+    const scn = Graph.scene();
+    starfield = makeStarfield(5200);
+    core = makeCoreGlow();
+    scn.add(starfield);
+    scn.add(core);
+    halos.clear();
+    Graph.nodeThreeObject(n => makeHalo(n));
+    Graph.nodeThreeObjectExtend(true);     // keep the solid core, add the glow
+    // the bundle ships AmbientLight(0xcccccc, PI) + DirectionalLight(0xffffff, 0.6*PI);
+    // scale from those rather than replacing them
+    const lights = Graph.lights();
+    if (lights && lights[0]) lights[0].intensity = Math.PI * 1.15;
+    if (lights && lights[1]) lights[1].intensity = 0.6 * Math.PI * 1.25;
+  } else {
+    console.warn('[alfred] running without the shared three.js - glow sprites and starfield are off');
+  }
+
+  repaintNodes();
+  buildLegend();
+  updateStats();
+
+  // Frame the whole galaxy once the layout settles - but only while the viewer has
+  // not taken the camera anywhere itself. On a slow machine (or a big vault) the
+  // simulation can still be cooling for many seconds after load, and without this
+  // guard the auto-frame fires *after* a click and drags the camera away from the
+  // note the user just flew to.
+  Graph.onEngineStop(() => {
+    measureGalaxy();
+    if (!selected && !lastFlyTo){
+      resetCamera(1600);
+    } else {
+      console.log('[alfred] layout settled; leaving the camera where the viewer put it');
+    }
+    setTimeout(verifyRender, 900);
+  });
+
+  // one call to /health does three things: it greets you, it warns about the key, and
+  // it is how the page knows how many notes the galaxy is holding. The hour is sent
+  // from HERE, because the browser's clock is the one the person reading this is
+  // living by - the salutation is composed server-side (see THE PERSONA in server.py)
+  // but the time of day comes from the person being greeted.
+  fetch('/health?hour=' + new Date().getHours()).then(r => r.ok ? r.json() : null).then(h => {
+    if (!h) return;
+    if (h.greeting) greet(h.greeting);
+    // is a focus session already running? A reloaded tab rejoins it rather than losing
+    // it, because the session is the server's, not this page's
+    joinFocus();
+    // the character's own lines for the screen share - the viewer carries none of them
+    if (h.sight && h.sight.lines) sightLines = h.sight.lines;
+    // which brain is in the chair, and every name he can wear: straight from the server
+    if (h.brains) brainCatalog = h.brains;
+    paintBrain(h);
+    // notes filed since the last build.py run: the server kept them, so a reload
+    // shows them too, quietly - no pulse and no camera flight at boot
+    (h.captures || []).forEach(entry => {
+      try { addCaptureNode(entry); } catch (err){ console.warn('[alfred] could not add a capture', err); }
+    });
+    if (h.key && h.key.state !== 'set'){
+      const note = $('key-note');
+      if (note){
+        note.textContent = h.key.state === 'missing'
+          ? 'No API key in config.json - the galaxy works, the brain is asleep.'
+          : 'config.json still holds the placeholder key - paste your real one and restart server.py to wake the brain.';
+        note.hidden = false;
+      }
+    }
+  }).catch(() => {});
+
+  // fade the boot overlay out as soon as we have actually drawn frames
+  setTimeout(() => boot.classList.add('gone'), 400);
+  // the screen button: start a share, or stop the one that is running
+  const sightBtn = $('sight');
+  if (sightBtn){
+    if (!sightSupported()){
+      const form = $('ask-form');
+      if (form) form.classList.add('unsupported');
+      sightBtn.title = 'This browser cannot share a screen';
+    }
+    sightBtn.onclick = () => {
+      if (shareState === 'live'){ stopSharing(); return; }
+      startSharing();
+    };
+  }
+  paintSight();
+
+  window.__alfred = {graph: Graph, data: GRAPH, selfTest: verifyRender, focus: setFocus,
+                     reset: clearFocus, loadScript, loadThree, CFG,
+                     camRadius: () => camRadius, lastFlyTo: () => lastFlyTo,
+                     layoutStable: () => !Graph || Graph.graphData().nodes.every(n => n.fx === undefined),
+                     // voice, exposed for the test suites and for debugging
+                     voice: {
+                       FINISH_MS, INTERRUPT_WORDS, RECOGNITION_LANG, MUTED_BY_URL,
+                       speak, startListening, stopListening,
+                       status: () => voiceState,
+                       detail: () => (voiceDetailEl ? voiceDetailEl.textContent : ''),
+                       label: () => (voiceTextEl ? voiceTextEl.textContent : ''),
+                       buffer: () => pendingUtterance,
+                       isListening: () => listening,
+                       wantsListening: () => wantListening,
+                       chosenVoice: () => chosenVoice,
+                       voices: () => voices,
+                       lastSpoken: () => lastSpoken,
+                       isUnlocked: () => unlocked,
+                       setSpeaker: (on) => { speakerOn = !!on; return speakerOn; },
+                       submitQuestion,
+                       // test seam: lets a suite drive recognition events directly
+                       _hooks: {
+                         final: onFinalFragment, interim: onInterimFragment,
+                         interrupt: interruptNow, finish: finishAndSend
+                       }
+                     },
+                     greeting: () => ({shown: greeted, text: greeted ? answerText.textContent : ''}),
+                     // sight: pointing at your own screen
+                     sight: {
+                       JPEG_QUALITY: SIGHT_JPEG_QUALITY, MAX_EDGE: SIGHT_MAX_EDGE,
+                       FRAME_TIMEOUT_MS: SIGHT_FRAME_TIMEOUT_MS,
+                       ENDED_WINDOW_MS: SIGHT_ENDED_WINDOW_MS,
+                       supported: sightSupported, isSharing: sightIsSharing,
+                       state: () => shareState, track: () => shareTrack,
+                       start: startSharing, stop: stopSharing,
+                       grabFrame, submitScreen, takeFrame: (q) => submitScreen(q, {reason: 'test'}),
+                       lastFrame: () => lastFrameSent,
+                       lines: () => sightLines,
+                       screenQuestion,
+                       badge: () => {
+                         const b = $('sight-badge');
+                         return {hidden: !!b.hidden, className: b.className || '',
+                                 text: $('sight-badge-text').textContent,
+                                 sub: $('sight-badge-sub').textContent};
+                       },
+                       ring: () => $('sight-ring').classList.contains('on'),
+                       button: () => ({pressed: $('sight').getAttribute('aria-pressed'),
+                                       className: $('sight').className || ''}),
+                       frameShown: () => ($('a-frame').hidden ? null : {
+                         src: String($('frame-shot').src || '').slice(0, 64),
+                         meta: $('frame-meta').textContent})
+                     },
+                     // which brain is answering: the chip, and the spoken-name routing
+                     brain: {
+                       label: () => ($('brain-label') ? $('brain-label').textContent : ''),
+                       chip: () => ({label: $('brain-label').textContent,
+                                     className: $('brain-chip').className || '',
+                                     swapped: $('brain-chip').classList.contains('swapped'),
+                                     flashing: $('brain-chip').classList.contains('flash'),
+                                     title: $('brain-chip').title || '',
+                                     untilRestart: !$('brain-temp').hidden}),
+                       catalog: () => brainCatalog.map(b => Object.assign({}, b)),
+                       isCommand: isBrainCommand,
+                       paint: paintBrain,
+                       submit: submitBrain
+                     },
+                     // focus sessions: the card, the button, the routing
+                     focus: {
+                       POLL_MS: FOCUS_POLL_MS, DEFAULT_MINUTES: FOCUS_DEFAULT_MINUTES,
+                       state: () => focusState,
+                       spokenSeq: () => focusSpoken,
+                       isCommand: isFocusCommand,
+                       paint: paintFocus, submit: submitFocus, button: focusButton,
+                       join: joinFocus, poll: pollFocus, clock: focusClock,
+                       card: () => {
+                         const card = $('focus-card');
+                         return {hidden: !!card.hidden, className: card.className || '',
+                                 phase: $('focus-phase').textContent,
+                                 clock: $('focus-clock').textContent,
+                                 fill: $('focus-fill').style.width,
+                                 state: $('focus-state').textContent,
+                                 meta: $('focus-meta').textContent,
+                                 tier: $('focus-tier').textContent,
+                                 end: $('focus-end').textContent};
+                       },
+                       button_face: () => ({pressed: $('focus-btn').getAttribute('aria-pressed'),
+                                            className: $('focus-btn').className || ''}),
+                       reportShown: () => focusReportShown
+                     },
+                     // growing the brain by voice: filing a note and watching it arrive
+                     capture: {
+                       PULSE_MS: CAPTURE_PULSE_MS, trigger: REMEMBER_TRIGGER,
+                       isRemember, thoughtOf, submitCapture, addCaptureNode, birthPulse,
+                       lastBirth: () => lastBirth,
+                       lastSpawn: () => lastSpawn,
+                       nodes: () => NODES.map(n => ({id: n.id, index: n.index, label: n.label,
+                                                     group: n.group, degree: n.degree,
+                                                     x: n.x, y: n.y, z: n.z, path: n.path})),
+                       links: () => linkObjs.map(l => ({source: l.source.id, target: l.target.id,
+                                                        kind: l.kind, weight: l.weight})),
+                       click: (id) => { const n = nodesById.get(id); if (n) setFocus(n); return !!n; },
+                       stats: () => $('stats').textContent,
+                       foot: () => answerFoot.textContent
+                     },
+                     // what the galaxy showed of where the last answer came from
+                     provenance: {
+                       FLY_MAX: PROVENANCE_FLY_MAX, SPEAK_MAX_CHARS,
+                       last: () => lastSourcePlan,
+                       lit: () => Array.from(litIds).sort((a, b) => a - b),
+                       litLinks: () => Array.from(litPair).sort(),
+                       panelOpen: () => panel.classList.contains('open'),
+                       panelLabel: () => $('panel-label').textContent,
+                       answerSource, showAnswerSource, spokenText
+                     }};
+}
+
+/* -- in-browser health check: is the renderer really drawing? -------------- */
+function verifyRender(){
+  const out = {notes: NODES.length, links: linkObjs.length, three: null, webgl: null,
+               drawCalls: null, sceneChildren: null, starfield: null, ok: false};
+  try {
+    const r = Graph.renderer();
+    const gl = r.getContext();
+    out.webgl = gl ? (gl.getParameter(gl.VERSION) || 'yes') : 'no context';
+    out.three = (THREE && THREE.REVISION) || (window.__THREE__ ? String(window.__THREE__) : 'bundled');
+    out.drawCalls = r.info.render.calls;
+    out.sceneChildren = Graph.scene().children.length;
+    out.starfield = !!(starfield && starfield.parent);
+    out.cameraFar = camera ? camera.far : null;
+    out.ok = out.drawCalls > 0;
+  } catch (err){
+    out.error = String(err);
+  }
+  const el = $('status'), txt = $('status-text');
+  if (out.ok){
+    el.className = 'live';
+    txt.textContent = `live · ${out.drawCalls} draw calls · three r${out.three}`;
+  } else {
+    el.className = 'bad';
+    txt.textContent = 'renderer not drawing — open the console';
+  }
+  console.log('[alfred] self-test', out);
+  return out;
+}
+
+/* ======================= voice: the machine talking and listening ========= */
+
+const voiceEl = $('voice-status'), voiceTextEl = $('voice-text'), voiceDetailEl = $('voice-detail');
+const micBtn = $('mic'), speakBtn = $('speak-toggle');
+
+let voiceState = 'idle';
+let lastSpoken = null;
+let speakerOn = true;
+let unlocked = false;              // has the user interacted yet?
+let pendingSpeech = null;          // something queued before the first click
+let voices = [];
+let chosenVoice = null;
+
+function setVoiceStatus(state, detail){
+  voiceState = state;
+  if (!voiceEl) return;
+  voiceEl.dataset.state = state;
+  const labels = {
+    idle: "idle \u00b7 ask me something",
+    listening: "listening \u00b7 you're talking",
+    thinking: "thinking \u00b7 reading your notes",
+    speaking: "speaking \u00b7 alfred is talking",
+    muted: "muted \u00b7 this tab never speaks",
+    stopped: "stopped \u00b7 not listening",
+    error: "can't listen here"
+  };
+  voiceTextEl.textContent = labels[state] || state;
+  let note = detail || '';
+  if (MUTED_BY_URL && state !== 'muted'){
+    note = (note ? note + ' \u00b7 ' : '') + '?mute=1 \u00b7 silent';
+  }
+  voiceDetailEl.textContent = note;
+  if (micBtn) micBtn.setAttribute('aria-pressed', state === 'listening' ? 'true' : 'false');
+}
+
+/* ---- voices ------------------------------------------------------------- */
+function refreshVoices(){
+  const synth = window.speechSynthesis;
+  voices = (synth && synth.getVoices && synth.getVoices()) || [];
+  chosenVoice = chooseVoice(voices);
+  return chosenVoice;
+}
+function chooseVoice(list){
+  if (!list || !list.length) return null;
+  for (const re of VOICE_LANGS){
+    const hit = list.find(v => re.test(v.lang || '') || re.test(v.name || ''));
+    if (hit) return hit;
+  }
+  const hinted = list.find(v => VOICE_NAMES.test(v.name || ''));
+  return hinted || list[0] || null;
+}
+if (window.speechSynthesis){
+  refreshVoices();
+  if (window.speechSynthesis.addEventListener){
+    window.speechSynthesis.addEventListener('voiceschanged', refreshVoices);
+  } else {
+    window.speechSynthesis.onvoiceschanged = refreshVoices;
+  }
+}
+
+function forSpeech(text){
+  return String(text == null ? '' : text)
+    .replace(/[#*_`>\[\]]/g, '')      // stray markdown
+    .replace(/\u2026/g, '...')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/* ---- the one function that speaks -------------------------------------- */
+function speak(text, detail){
+  // THE mute gate. Checked here and nowhere else, so no code path can talk
+  // around it: a ?mute=1 tab is silent no matter who asks.
+  if (MUTED_BY_URL){
+    setVoiceStatus('muted', '?mute=1 \u00b7 nothing in this tab will speak');
+    return Promise.resolve(false);
+  }
+  if (!speakerOn){
+    setVoiceStatus('idle', 'spoken answers off');
+    return Promise.resolve(false);
+  }
+  const synth = window.speechSynthesis;
+  const Utter = window.SpeechSynthesisUtterance;
+  if (!synth || !Utter){
+    setVoiceStatus('idle', 'this browser cannot speak');
+    return Promise.resolve(false);
+  }
+  const clean = forSpeech(text);
+  if (!clean) return Promise.resolve(false);
+
+  // Browsers refuse to play audio until the user has interacted. Hold the line
+  // instead of dropping it, and unlockSpeech() will say it after the first click.
+  if (!unlocked){
+    pendingSpeech = clean;
+    setVoiceStatus('idle', 'waiting for your first click');
+    return Promise.resolve(false);
+  }
+
+  try { synth.cancel(); } catch (err) { /* nothing was queued */ }
+
+  let u;
+  try {
+    u = new Utter(clean);
+  } catch (err){
+    setVoiceStatus('error', 'this browser could not build a spoken line');
+    return Promise.resolve(false);
+  }
+  const v = chosenVoice || refreshVoices();
+  // Setting .voice throws on some platforms when the object the browser handed us
+  // is not a real SpeechSynthesisVoice. Losing the accent is fine; losing the
+  // answer is not, so fall back to the language tag and carry on.
+  if (v){
+    try {
+      u.voice = v;
+      u.lang = v.lang || 'en-GB';
+    } catch (err){
+      u.lang = (v && v.lang) || 'en-GB';
+      setVoiceStatus('speaking', 'voice not assignable here - using the default');
+    }
+  } else {
+    u.lang = 'en-GB';
+  }
+  u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let guard = null;
+    const done = (spoken) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+      if (!listening) setVoiceStatus('idle', spoken ? 'your turn' : '');
+      resumeIfHandsFree();
+      resolve(spoken);
+    };
+    // Safety net: a few platforms report the end of an utterance late, or never.
+    // Without this the status line would sit on "speaking" and the ask button would
+    // never re-enable.
+    guard = setTimeout(() => {
+      setVoiceStatus('idle', 'speech timed out');
+      try { synth.cancel(); } catch (err) { /* nothing playing */ }
+      done(false);
+    }, Math.max(4000, clean.length * 90 + 2000));
+    u.onstart = () => {
+      lastSpoken = clean;
+      const bits = [v ? (v.name + ' \u00b7 ' + v.lang) : 'system voice'];
+      if (detail) bits.push(detail);
+      setVoiceStatus('speaking', bits.join(' \u00b7 '));
+    };
+    u.onend = () => done(true);
+    u.onerror = (e) => {
+      setVoiceStatus('idle', 'speech failed: ' + ((e && e.error) || 'unknown'));
+      done(false);
+    };
+    try {
+      synth.speak(u);
+    } catch (err){
+      setVoiceStatus('idle', 'speech failed: ' + err.message);
+      done(false);
+    }
+  });
+}
+
+// Hands-free: if the question came in by voice, open the mic again once Alfred has
+// finished talking, so the conversation can carry on without touching anything.
+function resumeIfHandsFree(){
+  if (resumeListeningAfterSpeech){
+    resumeListeningAfterSpeech = false;
+    startListening();
+  }
+}
+
+/* ---- unlocking audio on the first user gesture -------------------------- */
+function unlockSpeech(){
+  if (unlocked) return;
+  unlocked = true;
+  // A muted tab does not touch the speech engine at all - not even the silent
+  // priming utterance below, which would otherwise be a way around the gate.
+  if (MUTED_BY_URL){
+    setVoiceStatus('muted', '?mute=1 \u00b7 nothing in this tab will speak');
+    return;
+  }
+  // Prime the engine inside the gesture that unlocked it; some browsers need a
+  // silent utterance before they will play a real one later.
+  const synth = window.speechSynthesis;
+  if (synth && window.SpeechSynthesisUtterance){
+    try {
+      const primer = new window.SpeechSynthesisUtterance(' ');
+      primer.volume = 0;
+      synth.speak(primer);
+      synth.cancel();
+    } catch (err) { /* the engine may be missing entirely - speak() reports it */ }
+  }
+  refreshVoices();
+  if (pendingSpeech){
+    const queued = pendingSpeech;
+    pendingSpeech = null;
+    speak(queued);                     // the first spoken line lands here, after your click
+  } else if (voiceState === 'idle'){
+    setVoiceStatus('idle', 'ready');
+  }
+}
+window.addEventListener('pointerdown', unlockSpeech, {passive: true});
+window.addEventListener('keydown', unlockSpeech, {passive: true});
+window.addEventListener('touchstart', unlockSpeech, {passive: true});
+
+/* ---- listening ---------------------------------------------------------- */
+const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null;
+let listening = false;          // is the mic on right now?
+let wantListening = false;      // should it be on? (auto-restarts across silence)
+let lastHeard = '';
+let finishTimer = null;         // the FINISH_MS window
+let pendingUtterance = '';      // what we have buffered but not yet sent
+let restartTimer = null;
+let dispatchedInThisTurn = false;
+let resumeListeningAfterSpeech = false;   // hands-free: keep the conversation going
+
+function isInterrupt(text){
+  const bare = String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return INTERRUPT_WORDS.includes(bare);
+}
+function showBuffer(interim){
+  const text = (pendingUtterance + (interim ? (pendingUtterance ? ' ' : '') + interim : '')).trim();
+  if (text) input.value = text;
+  return text;
+}
+function short(text, n = 34){
+  const t = String(text || '').trim();
+  return t.length > n ? t.slice(0, n - 1) + '\u2026' : t;
+}
+
+// A finalised fragment: do NOT send. Buffer it and restart the window, so a pause
+// in the middle of a sentence does not cut the question in half.
+function onFinalFragment(text){
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  if (isInterrupt(clean)) return interruptNow(clean);      // short interrupt words fire now
+
+  pendingUtterance = (pendingUtterance ? pendingUtterance + ' ' : '') + clean;
+  showBuffer('');
+  clearTimeout(finishTimer);                                // more speech: restart the window
+  finishTimer = setTimeout(finishAndSend, FINISH_MS);
+  setVoiceStatus('listening', `heard "${short(clean)}" \u00b7 ${FINISH_MS}ms pause to add more`);
+}
+
+// Interim results are just a preview, except for interrupt words which must be instant.
+function onInterimFragment(text){
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  if (isInterrupt(clean)) return interruptNow(clean);
+  showBuffer(clean);
+  setVoiceStatus('listening', `hearing "${short(clean)}"`);
+}
+
+// The pause that ends the thought: send the whole combined sentence.
+function finishAndSend(){
+  clearTimeout(finishTimer);
+  finishTimer = null;
+  const question = pendingUtterance.trim();
+  pendingUtterance = '';
+  if (!question) return;
+  if (isInterrupt(question)) return interruptNow(question);
+  resumeListeningAfterSpeech = wantListening;   // hands-free conversation
+  stopListening('sent');
+  setVoiceStatus('thinking', 'sent: "' + short(question, 46) + '"');
+  submitQuestion(question);
+}
+
+function interruptNow(word){
+  clearTimeout(finishTimer);
+  finishTimer = null;
+  pendingUtterance = '';
+  resumeListeningAfterSpeech = false;
+  stopListening('interrupted');
+  if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (err) {} }
+  input.value = '';
+  setVoiceStatus('stopped', 'heard "' + short(word, 18) + '" \u00b7 cancelled, nothing sent');
+}
+
+function makeRecognition(){
+  if (!SpeechRecognitionCtor) return null;
+  const r = new SpeechRecognitionCtor();
+  r.lang = RECOGNITION_LANG;
+  r.continuous = true;          // keep going across pauses; we do the stitching
+  r.interimResults = true;      // needed to react to "stop" the moment it is said
+  r.maxAlternatives = 1;
+  r.onstart = () => { listening = true; setVoiceStatus('listening', 'listening\u2026'); };
+  r.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++){
+      const result = event.results[i];
+      const text = (result[0] && result[0].transcript) || '';
+      if (result.isFinal){
+        onFinalFragment(text);
+        dispatchedInThisTurn = dispatchedInThisTurn || false;
+      } else {
+        interim += text;
+      }
+    }
+    if (interim) onInterimFragment(interim);
+  };
+  r.onerror = (event) => {
+    const code = (event && event.error) || 'unknown';
+    if (code === 'no-speech' || code === 'aborted') return;      // normal, the restart handles it
+    if (code === 'not-allowed' || code === 'service-not-allowed'){
+      wantListening = false;
+      setVoiceStatus('error', 'microphone blocked - allow it in the address bar');
+      return;
+    }
+    if (code === 'network'){
+      wantListening = false;
+      setVoiceStatus('error', 'speech recognition needs a network connection');
+      return;
+    }
+    setVoiceStatus('error', 'listening failed: ' + code);
+  };
+  r.onend = () => {
+    listening = false;
+    // Chrome ends the session on silence; restart so the mic stays open until the
+    // user switches it off.
+    if (wantListening){
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(() => { if (wantListening) startListening(); }, 220);
+    } else if (voiceState === 'listening'){
+      setVoiceStatus('idle', '');
+    }
+  };
+  return r;
+}
+
+function startListening(){
+  if (!SpeechRecognitionCtor){
+    setVoiceStatus('error', 'this browser cannot listen - type instead');
+    return false;
+  }
+  if (listening){ setVoiceStatus('listening', 'listening\u2026'); return true; }
+  if (!recog) recog = makeRecognition();
+  wantListening = true;
+  try {
+    recog.start();
+  } catch (err){
+    // calling start() while already started throws; the existing session is fine
+    if (!/already started|already_started/i.test(err.message || '')){
+      setVoiceStatus('error', 'could not start the microphone: ' + err.message);
+      wantListening = false;
+      return false;
+    }
+  }
+  listening = true;
+  setVoiceStatus('listening', 'listening\u2026');
+  return true;
+}
+
+function stopListening(detail){
+  wantListening = false;
+  clearTimeout(restartTimer);
+  clearTimeout(finishTimer);
+  finishTimer = null;
+  if (recog){
+    try { recog.stop(); } catch (err) { /* not running */ }
+  }
+  if (listening) listening = false;
+  if (voiceState === 'listening') setVoiceStatus('idle', detail === 'sent' ? 'sent' : '');
+}
+
+/* ---- the buttons -------------------------------------------------------- */
+setVoiceStatus(MUTED_BY_URL ? 'muted' : 'idle',
+               MUTED_BY_URL ? '?mute=1 \u00b7 nothing in this tab will speak' : '');
+
+if (micBtn){
+  if (!SpeechRecognitionCtor){
+    micBtn.disabled = true;
+    micBtn.title = 'This browser cannot listen (no webkitSpeechRecognition)';
+    const askForm = $('ask-form');
+    if (askForm) askForm.classList.add('unsupported');
+    setVoiceStatus('error', 'this browser cannot listen - typing still works');
+  } else {
+    micBtn.addEventListener('click', () => {
+      unlockSpeech();
+      if (wantListening || listening){
+        stopListening('switched off');
+        setVoiceStatus('stopped', 'microphone off');
+      } else {
+        pendingUtterance = '';
+        startListening();
+      }
+      input.focus();
+    });
+  }
+}
+if (speakBtn){
+  speakBtn.addEventListener('click', () => {
+    speakerOn = !speakerOn;
+    speakBtn.setAttribute('aria-pressed', speakerOn ? 'true' : 'false');
+    speakBtn.title = speakerOn ? 'Spoken answers on (click to silence)' : 'Spoken answers off (click to enable)';
+    if (!speakerOn){
+      if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (err) {} }
+      setVoiceStatus(MUTED_BY_URL ? 'muted' : 'idle', 'spoken answers off');
+    } else if (MUTED_BY_URL){
+      setVoiceStatus('muted', '?mute=1 \u00b7 nothing in this tab will speak');
+    } else {
+      setVoiceStatus('idle', 'spoken answers on');
+      speak('Spoken answers on.');
+    }
+  });
+}
+/* ------------------------------------------------------------------ the focus UI */
+$('focus-btn').addEventListener('click', focusButton);
+$('focus-end').addEventListener('click', async (event) => {
+  event.preventDefault();
+  await submitFocus('end the session');
+});
+/* On boot, ask the server whether a session is already running: a reloaded tab rejoins
+   it, wherever it was started from. Nothing is spoken here - the callouts and the report
+   are spoken as they arrive, so a page that opens mid-drift hears the next nag. */
+async function joinFocus(){
+  // The same request the poll makes, with `since` at whatever this tab has already dealt
+  // with (nothing, on a fresh page). The server decides what is still worth saying: it
+  // returns callouts no older than CALLOUT_REPLAY_S, so a page that opens mid-drift hears
+  // the callout that just happened - and never one from ten minutes ago.
+  try {
+    await pollFocus();
+    if (focusState && focusState.phase !== 'idle') startFocusPoll();
+  } catch (err){ /* no session to join */ }
+}
+
+/* ------------------------------------------------------------ the brain UI */
+const form = $('ask-form'), input = $('q'), send = $('send');
+const answerBox = $('answer'), answerText = $('answer-text'),
+      answerSrc = $('answer-sources'), answerFoot = $('a-foot'), answerModel = $('a-model');
+
+function showAnswer(){ answerBox.hidden = false; }
+
+/* The boot greeting: the line comes from the server (persona + the real note count),
+   and it is spoken like anything else - which means before the first click it waits in
+   pendingSpeech and is heard the moment the page is touched, and in a ?mute=1 tab it is
+   never spoken at all. It is shown straight away either way. */
+let greeted = false;
+function greet(line){
+  const text = String(line || '').trim();
+  if (!text || greeted) return;
+  greeted = true;
+  answerText.className = 'greeting';
+  answerText.textContent = text;
+  answerSrc.innerHTML = '';
+  answerModel.textContent = '';
+  answerFoot.textContent = 'ready when you are';
+  showAnswer();
+  speak(text);
+}
+function thinking(label){
+  hideFrame();                     // the previous frame belongs to the previous answer
+  answerText.className = 'thinking';
+  answerText.textContent = label || 'reading your notes…';
+  answerSrc.innerHTML = ''; answerFoot.textContent = ''; answerModel.textContent = '';
+  showAnswer();
+}
+function renderAnswer(data, plan){
+  answerText.className = '';
+  answerText.textContent = data.answer || '(empty answer)';
+  answerModel.textContent = data.model ? `· ${data.model}` : '';
+  answerSrc.innerHTML = '';
+  const primary = plan && plan.kind === 'single' ? plan.node : null;
+  (data.nodes || []).forEach(idx => {
+    const n = byIndex.get(idx);
+    if (!n) return;
+    const b = document.createElement('button');
+    b.className = 'src' + (n === primary ? ' primary' : '');
+    if (n === primary) b.title = 'the camera flew here';
+    b.innerHTML = `<i style="background:${colorOf(n)}"></i>${esc(n.label)}<span class="idx">#${idx}</span>`;
+    b.onclick = () => setFocus(n);
+    answerSrc.appendChild(b);
+  });
+  const bits = [];
+  // what the answer came from, said plainly - and how many notes it was shown
+  const used = (data.nodes || []).length;
+  if (data.decision === 'screen'){
+    // a screen answer: say so, with the frame it came from. The galaxy lit nothing,
+    // because nothing in it was the source.
+    bits.push('from the screen');
+    if (data.frame){
+      bits.push(`${data.frame.width}\u00d7${data.frame.height}`);
+      bits.push(`${Math.max(1, Math.round((data.frame.bytes || 0) / 1024))} KB`);
+    }
+    bits.push('no notes used');
+  }
+  else if (data.on_notes === false) bits.push('no notes used');
+  else if (used) bits.push(`from ${used} note${used === 1 ? '' : 's'}`);
+  else bits.push('no notes matched');
+  if (data.read && data.read.length) bits.push(`read ${data.read.length}`);
+  if (data.turns != null) bits.push(`memory ${data.turns} turn${data.turns === 1 ? '' : 's'}`);
+  if (data.model) bits.push(data.model);
+  answerFoot.textContent = bits.join(' · ');
+  showAnswer();
+}
+function renderError(msg, hint){
+  answerText.className = 'error';
+  answerText.textContent = msg + (hint ? '\n\n' + hint : '');
+  answerSrc.innerHTML = ''; answerModel.textContent = ''; answerFoot.textContent = '';
+  showAnswer();
+}
+$('a-close').onclick = () => { answerBox.hidden = true; };
+
+/* --------------------------------------------------- where an answer came from
+   The order of these two functions IS the feature, so keep it:
+
+     answerSource(data)      decide what the answer came from - pure, no side effects,
+                             nothing in here may touch the camera or the lights
+     showAnswerSource(plan)  only then act on that decision
+
+   Small talk never reaches the camera, because the server sends it back with no
+   sources at all and on_notes: false - the decision is made and is "still". That is
+   what stops "good morning" from dragging the view across the galaxy. */
+function answerSource(data){
+  const nodes = (Array.isArray(data && data.nodes) ? data.nodes : [])
+    .map(i => byIndex.get(i))
+    .filter(Boolean);
+  const usedNotes = !data || data.on_notes !== false;   // an older server says nothing: trust its list
+  const empty = {kind: 'still', nodes: [], why: !usedNotes ? 'small talk' : 'no notes used'};
+  if (!usedNotes || !nodes.length) return empty;
+  if (nodes.length >= PROVENANCE_FLY_MAX + 1)
+    return {kind: 'cluster', nodes, why: nodes.length + ' notes'};
+  return {kind: 'single', node: nodes[0], nodes, why: '1 note'};
+}
+
+function showAnswerSource(plan){
+  if (!plan || plan.kind === 'still') return;      // the galaxy holds perfectly still
+  if (plan.kind === 'single'){
+    // the whole answer: fly to it, light it and everything it is joined to, open it
+    setFocus(plan.node);
+    return;
+  }
+  // four or more notes: light the cluster itself, move nothing. The side panel names
+  // exactly one note, which is not what happened here, so it closes.
+  selected = null;
+  domainNodes = null;
+  closePanel();
+  litIds = new Set(plan.nodes.map(n => n.id));
+  litPair = new Set();
+  for (let i = 0; i < plan.nodes.length; i++){
+    for (let j = i + 1; j < plan.nodes.length; j++){
+      const a = plan.nodes[i], b = plan.nodes[j];
+      if ((adj.get(a.id) || []).some(e => e.node === b)) litPair.add(a.id + '|' + b.id);
+    }
+  }
+  repaintNodes();
+}
+
+/* The spoken version of an answer: the answer, and never the note. Past
+   SPEAK_MAX_CHARS it is cut at a sentence end - the rest is on screen, and reading
+   a note aloud is exactly what this must not do. */
+function spokenText(answer){
+  const full = String(answer == null ? '' : answer).trim();
+  if (full.length <= SPEAK_MAX_CHARS) return {text: full, trimmed: false};
+  const head = full.slice(0, SPEAK_MAX_CHARS);
+  const cut = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '));
+  if (cut < SPEAK_MAX_CHARS * 0.4) return {text: full, trimmed: false};   // one long sentence: read it
+  return {text: head.slice(0, cut + 1).trim(), trimmed: true};
+}
+
+/* A capture, on screen. The line comes from the server (persona + the real facts of
+   where the note landed), and the footer says where the file is - including the
+   honest note that the graph file has not caught up with it yet. */
+function renderCapture(data, ok){
+  answerText.className = 'captured' + (ok ? '' : ' failed');
+  answerText.textContent = data.line || data.answer || (ok ? 'Filed.' : 'It did not go in.');
+  answerModel.textContent = '';
+  answerSrc.innerHTML = '';
+  if (ok){
+    const bits = ['filed'];
+    if (data.file) bits.push(data.file);
+    if (data.date) bits.push(data.date);
+    if (data.node) bits.push(`${data.notes} notes, ${(data.node.degree || 0)} links`);
+    if (data.graph_file === 'behind') bits.push('run python3 build.py to write it into graph-data.js');
+    answerFoot.textContent = bits.join(' \u00b7 ');
+  } else {
+    answerFoot.textContent = data.hint || '';
+  }
+  showAnswer();
+}
+
+/* "remember that ..." - the other half of the ask bar. It writes a real note, and
+   then the galaxy grows: born at the note it is most related to, a brief glow, and
+   only then the camera. A failure is never silent - it is shown AND spoken. */
+async function submitCapture(sentence){
+  send.disabled = true;
+  thinking('writing it down\u2026');
+  setVoiceStatus('thinking', 'writing it down\u2026');
+  answerBox.hidden = false;
+  try {
+    const res = await fetch('/remember', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: sentence})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    const ok = res.ok && data.ok !== false && data.captured !== false;
+    if (!ok){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'the capture did not land'};
+      renderCapture(data, false);
+      await speak(data.line || data.answer || data.error ||
+                  `The brain returned HTTP ${res.status}.`);
+      return;
+    }
+    renderCapture(data, true);
+    lastSourcePlan = {kind: 'capture', nodes: [], why: 'a new note was filed', node: data.node};
+    const born = addCaptureNode(data);
+    input.value = '';                         // the thought is filed; the bar is free again
+    speak(data.line || data.answer);          // the confirmation, out loud
+    const pulse = await birthPulse(born);     // born, then a brief glow...
+    setFocus(born.node);                      // ...then the camera goes to it
+    // Let the layout have it only now: the star was pinned where it was born, and
+    // once the camera is on its way it becomes an ordinary citizen of the galaxy.
+    setTimeout(() => {
+      born.node.fx = born.node.fy = born.node.fz = undefined;
+      if (born.anchor) born.anchor.fx = born.anchor.fy = born.anchor.fz = undefined;
+    }, CFG.flyMs);
+    lastBirth = {id: born.node.id, label: born.node.label,
+                 anchor: born.anchor ? born.anchor.id : null, at: born.at,
+                 spawn: lastSpawn,
+                 pulseMs: CAPTURE_PULSE_MS, pulseEndedAt: pulse.endedAt,
+                 flewAt: lastFlyTo ? lastFlyTo.at : null, file: data.file || '',
+                 pinned: () => born.node.fx !== undefined};
+  } catch (err){
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'the capture did not land'};
+    renderCapture({line: 'It did not go in, sir - I could not reach the server.'}, false);
+    await speak('I could not reach the server, sir, so nothing was written.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+let lastSourcePlan = null;      // what the last answer was judged to have come from
+let lastBirth = null;           // where the last capture was born and when it flew
+
+/* ---------------------------------------------------------------------------
+   a question about the screen
+   --------------------------------------------------------------------------- */
+function showFrame(frame, ok){
+  const box = $('a-frame'), img = $('frame-shot'), meta = $('frame-meta');
+  if (!box || !img || !meta) return;
+  if (!frame || !frame.dataUrl){ box.hidden = true; img.removeAttribute && img.removeAttribute('src'); return; }
+  img.src = frame.dataUrl;                     // the exact frame that was sent
+  const when = frame.at ? new Date(frame.at) : new Date();
+  const stamp = [when.getHours(), when.getMinutes(), when.getSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':');
+  // the type is the one the browser produced; the server names the same value in its
+  // own vocabulary (media_type), so both spellings are understood here
+  const type = frame.mediaType || frame.media_type || '';
+  meta.textContent = (ok ? 'the frame I looked at' : 'the frame I could not look at') +
+    '\n' + frame.width + '\u00d7' + frame.height + ' ' +
+    type.replace('image/', '').toUpperCase() +
+    ' \u00b7 ' + Math.max(1, Math.round((frame.bytes || 0) / 1024)) + ' KB \u00b7 taken at ' + stamp +
+    (frame.source && frame.source.width > frame.width
+      ? '\nscaled down from ' + frame.source.width + '\u00d7' + frame.source.height : '');
+  box.hidden = false;
+}
+function hideFrame(){
+  const box = $('a-frame');
+  if (box) box.hidden = true;
+}
+
+/* One line, shown and spoken, when there is no screen to look at. Never a guess. */
+async function sayNoScreen(line, detail){
+  answerText.className = 'error';
+  answerText.textContent = line;
+  answerModel.textContent = ''; answerSrc.innerHTML = '';
+  answerFoot.textContent = detail || '';
+  hideFrame();
+  showAnswer();
+  await speak(line);
+}
+
+async function submitScreen(question, options){
+  const opts = options || {};
+  // The share has to be live AT THIS MOMENT. If it is not, no frame is taken, nothing
+  // is sent, and he says so - a screen question is never answered from an earlier
+  // frame, or from a screen share that is over.
+  if (!sightIsSharing()){
+    input.value = '';                  // the question has been answered; the bar is free
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'no live screen share'};
+    const line = opts.reason === 'ended'
+      ? (sightLines.ended || 'The screen share has ended, sir.')
+      : (sightLines.never || 'I have not been shown your screen, sir.');
+    await sayNoScreen(line, opts.reason === 'ended'
+      ? 'the share is over - press the screen button to look again'
+      : 'nothing is being shared - press the screen button to show him');
+    return;
+  }
+  send.disabled = true;
+  thinking('looking at your screen\u2026');
+  setVoiceStatus('thinking', 'taking one frame\u2026');
+  answerBox.hidden = false;
+  const askedAt = Date.now();
+  try {
+    const grabbed = await grabFrame();            // taken here, at the moment you asked
+    if (!grabbed.ok){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'no frame'};
+      const line = sightLines.grab_failed || 'I could not take a picture of your screen, sir.';
+      await sayNoScreen(line, 'no frame was taken (' + grabbed.why + ') - nothing was sent');
+      return;
+    }
+    const frame = grabbed.frame;
+    lastFrameSent = frame;
+    input.value = '';                  // the question is on its way; the bar is free again
+    const res = await fetch('/see', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        question: question,
+        image: frame.dataUrl,                     // self-describing: the type travels with the bytes
+        media_type: frame.mediaType,
+        width: frame.width, height: frame.height,
+        asked_at: askedAt, captured_at: frame.capturedAt
+      })
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.ok === false || data.error){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'no answer'};
+      renderError(data.error || `The brain returned HTTP ${res.status}.`, data.hint || '');
+      showFrame(data.frame ? Object.assign({at: frame.capturedAt}, frame, data.frame) : frame, false);
+      await speak(data.answer || data.error || 'I could not reach the server.');
+      return;
+    }
+    // the same answer path as everything else: decide, render, then speak
+    const plan = answerSource(data);              // on_notes is false: the galaxy holds still
+    lastSourcePlan = plan;
+    renderAnswer(data, plan);
+    showFrame(Object.assign({at: frame.capturedAt}, frame, data.frame || {}), true);
+    if (data.model) answerModel.textContent = data.model ? `\u00b7 ${data.model}` : '';
+    const spoken = spokenText(data.answer || '');
+    await speak(spoken.text, spoken.trimmed ? 'the short version - the rest is on screen' : '');
+  } catch (err){
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'no answer'};
+    renderError('Could not reach the server.', String(err));
+    await speak('I could not reach the server, sir - nothing was looked at.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   the brain chip, and changing which brain answers
+
+   Every string here is built by the server: the label, the id, and whether this is a
+   runtime swap. The page does not own a single model name, so the chip and the answer
+   footer can never disagree with what was actually called.
+
+   A refusal is not an error to swallow: the server sends refused: true, the line it
+   sends names what he does have, and it is shown AND spoken while the chip stays on
+   the brain that is really in the chair.
+   --------------------------------------------------------------------------- */
+function paintBrain(data){
+  const chip = $('brain-chip'), label = $('brain-label');
+  if (!chip || !label) return;
+  const id = data.model || '';
+  label.textContent = data.label || data.model_label || (id ? id.split('/').pop() : '\u2014');
+  chip.classList.toggle('swapped', !!data.swapped);
+  const temp = $('brain-temp');
+  if (temp) temp.hidden = !data.swapped;
+  const parts = ['answering with ' + (id || 'the model in config.json')];
+  if (data.swapped) parts.push('swapped at runtime - a restart returns to ' +
+    (data.config_model || 'the model in config.json'));
+  parts.push('say \u201cswitch to \u2026\u201d to change it');
+  chip.title = parts.join(' \u00b7 ');
+}
+function flashBrain(){
+  const chip = $('brain-chip');
+  if (!chip || !chip.classList) return;
+  chip.classList.remove('flash');
+  void chip.offsetWidth;                 // restart the animation, if there is one
+  chip.classList.add('flash');
+  setTimeout(() => chip.classList.remove('flash'), 1700);
+}
+
+/* The words that mean "change which brain you are wearing". This is only the ROUTING
+   decision - what the words actually mean is decided by the server, in one place. A
+   question that merely mentions a model is not a command: it must start with one of
+   these verbs, must not be a question, and the weak verbs (use / be / try) need a name
+   the catalogue actually has, so "use the movers quote" stays a question. */
+const BRAIN_VERB = /^\s*(?:please\s+)?(?:switch|swap|change|turn|put\s+on|wear|become|try(?:\s+(?:on|out))?|be|use|go\s+back|back|revert|reset|return)\b/i;
+const BRAIN_WEAK_VERB = /^\s*(?:please\s+)?(?:use|be|become|try)\b/i;
+const BRAIN_QUESTION = /^\s*(?:what|which|who|when|where|why|how|is|are|was|were|do|does|did|can|could|would|will|should|tell|show|explain)\b/i;
+function namesABrain(text){
+  if (!brainCatalog.length) return true;      // catalogue not loaded yet: let the server say
+  const low = text.toLowerCase();
+  return brainCatalog.some(b => b && b.name && new RegExp('\\b' + b.name + '\\b').test(low));
+}
+function isBrainCommand(text){
+  const t = String(text || '').trim();
+  if (!t || t.length > 90 || t.indexOf('?') >= 0) return false;
+  if (/^\s*(?:your\s+)?(?:normal|default|usual|original)\s+brain\s*$/i.test(t)) return true;
+  if (BRAIN_QUESTION.test(t)) return false;
+  if (t.split(/\s+/).length > 9) return false;
+  if (!BRAIN_VERB.test(t)) return false;
+  if (!BRAIN_WEAK_VERB.test(t)) return true;  // switch / swap / change / go back are unambiguous
+  return namesABrain(t);
+}
+
+async function submitBrain(said){
+  send.disabled = true;
+  thinking('changing brains\u2026');
+  setVoiceStatus('thinking', 'changing brains\u2026');
+  answerBox.hidden = false;
+  try {
+    const res = await fetch('/model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: said})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.error){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'the brain was not changed'};
+      renderError(data.error || `The server returned HTTP ${res.status}.`, data.hint || '');
+      await speak(data.answer || data.error || 'I could not do that, sir.');
+      return;
+    }
+    input.value = '';                    // the command has been dealt with; the bar is free
+    paintBrain(data);                    // the chip first: it is the thing you are watching
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'no notes in this'};
+    renderBrain(data);
+    if (data.changed) flashBrain();
+    await speak(data.answer || data.spoken || '');
+  } catch (err){
+    lastSourcePlan = {kind: 'still', nodes: [], why: 'the brain was not changed'};
+    renderError('Could not reach the server.', String(err));
+    await speak('I could not reach the server, sir, so nothing was changed.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   FOCUS SESSIONS - "thirty minutes on this".
+
+   The session lives on the SERVER, on a one-second tick. This side is a view: it polls
+   /focus once a second while a session is live, paints the card, and speaks whatever the
+   server has decided to say. Closing the tab, reloading it, or opening it on another
+   machine does not touch the session - and the countdown is the server's clock, not this
+   one's, so a stalled tab cannot slow it down either.
+
+   NOTHING HERE KNOWS WHICH APP YOU ARE IN. The state is booleans and counters: on target
+   or not, which KIND of drift (an app or a tab - a category, not a name), how long, how
+   many. The app and the host are compared and discarded inside the server's reader.
+   --------------------------------------------------------------------------- */
+const FOCUS_POLL_MS = 1000;          // how often the card asks the server what is happening
+const FOCUS_DEFAULT_MINUTES = 30;    // what the button starts
+const FOCUS_CARD_LINGER_MS = 12000;  // how long the card stays after the report card
+const FOCUS_DRIFT_WORDS = {app: 'drifting \u00b7 another app', tab: 'drifting \u00b7 another tab'};
+
+// The routing shapes. Deliberately anchored and short: a question that merely mentions
+// focus, work, or a number of minutes must stay a question. The server re-parses every
+// command it is sent and answers "that is not a focus command" rather than acting on one,
+// so this is only about which door the utterance goes through.
+const FOCUS_START_RE = /\b(?:minutes?|mins?|hours?|hrs?)\b[^?]*?\b(?:on\s+this|on\s+it|focus|of\s+work|of\s+focus|session)\b|\b(?:focus|work)\b[^?]*?\b(?:for|on)\b[^?]*?\b(?:minutes?|mins?|hours?|hrs?)\b/i;
+const FOCUS_END_RE = /^\s*(?:please\s+)?(?:end|abort|finish|close)\b[^?]*$|^\s*(?:i'?m|i\s+am)\s+done\b|^\s*call\s+it(\s+a\s+session)?\s*$|^that'?s\s+enough\s*$/i;
+const FOCUS_PAUSE_RE = /^\s*(?:please\s+)?(?:pause|hold\s+on|take\s+a\s+break|break)\b[^?]*$/i;
+const FOCUS_RESUME_RE = /^\s*(?:please\s+)?(?:resume|unpause|continue|carry\s+on|back\s+to\s+work)\b[^?]*$/i;
+const FOCUS_OTHER_RE = /^\s*(?:please\s+)?(?:call\s+me\s+out|nag\s+me|tell\s+me|remind\s+me|check\s+on\s+me|call\s+it\s+out)\s+every\b[^?]*$|^\s*(?:snooze(?:\s+for)?|give\s+me|shush|quiet)\b[^?]*$|^\s*(?:extend|add)\b[^?]*$|^\s*(?:it'?s|its|it\s+is|that'?s|thats|that\s+is)\s+(?:ok|okay|fine|alright|all\s+right)\b[^?]*$|^\s*(?:i'?m|im|i\s+am)\s+(?:just\s+)?(?:doing\s+|in\s+)?research\b[^?]*$|^\s*excused\b/i;
+
+let focusState = null;          // the last state the server sent
+let focusSpoken = 0;            // the highest callout seq this tab has spoken
+let focusPoll = null;           // the poll timer
+let focusLinger = null;         // when to put the card away after the report
+let focusReportShown = null;    // the report the answer card is showing
+let focusRetired = false;       // the card has been put away after a report card
+let focusButtonBusy = false;
+
+function isFocusCommand(text, phase){
+  const t = String(text || '').trim();
+  if (!t || t.length > 90 || t.indexOf('?') >= 0) return false;
+  const live = phase === 'running' || phase === 'paused';
+  if (live){
+    // a session is on: these are commands about it
+    if (FOCUS_END_RE.test(t) || FOCUS_PAUSE_RE.test(t) || FOCUS_RESUME_RE.test(t)) return true;
+    if (FOCUS_OTHER_RE.test(t) && t.split(/\s+/).length <= 10) return true;
+  }
+  // starting only when there is nothing to talk about yet - or, with a session live,
+  // "another twenty minutes" is the extend command and the server says so
+  return FOCUS_START_RE.test(t) && t.split(/\s+/).length <= 10;
+}
+
+function focusClock(seconds){
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60), s = total % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+function paintFocus(state){
+  const card = $('focus-card');
+  if (!state || !state.phase || state.phase === 'idle'){
+    focusState = state || null;
+    card.hidden = true;
+    $('focus-btn').className = '';
+    $('focus-btn').setAttribute('aria-pressed', 'false');
+    return;
+  }
+  focusState = state;
+  const live = state.phase === 'running' || state.phase === 'paused';
+  if (state.phase !== 'ended') focusRetired = false;
+  if (focusRetired) return;            // the report card has been shown and put away
+  card.hidden = false;
+  card.className = state.phase === 'ended' ? 'ended'
+                 : (state.reader === 'blind' ? 'blind'
+                 : (state.drifting ? ('drift' + (state.tier >= 3 ? ' t3' : state.tier === 2 ? ' t2' : '')) : ''));
+  $('focus-phase').textContent = state.phase === 'ended' ? 'session closed'
+                               : state.phase === 'paused' ? 'focus \u00b7 paused' : 'focus';
+  $('focus-tier').textContent = state.drifting ? ('tier ' + state.tier) : '';
+  $('focus-tier').className = state.drifting ? 'fc-tier on' : 'fc-tier';
+  $('focus-clock').textContent = focusClock(state.remaining_s);
+  const done = state.planned_s ? Math.min(100, Math.max(0,
+      ((state.planned_s - state.remaining_s) / state.planned_s) * 100)) : 0;
+  $('focus-fill').style.width = state.phase === 'ended' ? '100%' : (done.toFixed(1) + '%');
+  $('focus-fill').style.background = state.drifting
+      ? (state.tier >= 3 ? 'var(--bad)' : 'var(--warn)') : 'var(--accent)';
+  // the state line: a category, a state, a duration - never a name
+  let line;
+  if (state.phase === 'ended') line = 'closed \u00b7 ' + state.clean_pct + '% clean';
+  else if (state.reader === 'blind') line = 'cannot see the front app';
+  else if (state.phase === 'paused') line = 'paused';
+  else if (state.drifting && state.excused) line = 'excused';
+  else if (state.drifting) line = FOCUS_DRIFT_WORDS[state.reason] || 'drifting';
+  else if (state.on_target && state.reason === 'home') line = 'on target \u00b7 home base';
+  else line = 'on target';
+  if (state.snoozed) line += ' \u00b7 snoozed ' + Math.ceil(state.snooze_s_left) + 's';
+  $('focus-state').textContent = line;
+  const bits = [];
+  if (state.phase === 'ended'){
+    bits.push(Math.round((state.planned_s - state.remaining_s) / 60) + 'm of ' +
+              Math.round(state.planned_s / 60) + 'm');
+  } else {
+    bits.push(Math.round(state.on_s / 60) + 'm on target');
+    if (state.drifting && state.off_open_s >= 1) bits.push(Math.round(state.off_open_s) + 's off');
+  }
+  if (state.drifts) bits.push(state.drifts + (state.drifts === 1 ? ' drift' : ' drifts'));
+  if (state.refunds) bits.push(state.refunds + ' refunded');
+  bits.push('nag ' + Math.round(state.nag_s) + 's');
+  $('focus-meta').textContent = bits.join(' \u00b7 ');
+  const btn = $('focus-btn');
+  btn.setAttribute('aria-pressed', live ? 'true' : 'false');
+  btn.className = state.drifting ? 'drift' : (live ? 'on' : '');
+  if (state.reader === 'blind' && live){
+    $('focus-meta').textContent = 'nothing is being counted \u00b7 ' + bits.join(' \u00b7 ');
+  }
+  // the report card, once, on the answer card where every other line of his lives
+  if (state.report && state.report.text && (!focusReportShown || focusReportShown !== state.report.text)){
+    focusReportShown = state.report.text;
+    renderFocusReport(state);
+  }
+}
+
+function renderFocusReport(state){
+  const r = state.report || {};
+  answerText.className = 'focus';
+  answerText.textContent = r.text || '';
+  answerModel.textContent = '';
+  answerSrc.innerHTML = '';
+  hideFrame();
+  const bits = [];
+  if (r.planned) bits.push(Math.round(r.planned) + 'm planned');
+  if (r.on != null) bits.push(r.on + 'm on target');
+  if (r.pct != null) bits.push(r.pct + '% clean');
+  if (r.drifts != null) bits.push(r.drifts + (r.drifts === 1 ? ' drift' : ' drifts'));
+  if (r.refunds) bits.push(r.refunds + ' refunded');
+  bits.push(r.counted ? ('streak ' + r.streak) : 'not in the ledger');
+  answerFoot.textContent = bits.join(' \u00b7 ');
+  showAnswer();
+}
+
+/* one poll: paint, and speak whatever the server has said since this tab last spoke */
+async function pollFocus(){
+  try {
+    const res = await fetch('/focus?since=' + focusSpoken, {cache: 'no-store'});
+    if (!res.ok) return;
+    const state = await res.json();
+    if (!state || state.ok === false) return;
+    paintFocus(state);
+    for (const call of (state.speak || [])){
+      if (call.seq <= focusSpoken) continue;
+      focusSpoken = call.seq;
+      speak(call.text);                       // the callouts, in his voice, in order
+      if (call.tier >= 1) flashFocusCard();
+    }
+    focusSpoken = Math.max(focusSpoken, state.since || 0);
+    if (state.phase === 'ended' && !focusLinger){
+      focusLinger = setTimeout(() => {
+        focusRetired = true;
+        $('focus-card').hidden = true;      // and a later poll cannot bring it back
+        stopFocusPoll();
+      }, FOCUS_CARD_LINGER_MS);
+    }
+  } catch (err){ /* the server is away: the card keeps the last state it had */ }
+}
+
+function startFocusPoll(){
+  if (focusPoll) return;
+  focusPoll = setInterval(pollFocus, FOCUS_POLL_MS);
+}
+function stopFocusPoll(){
+  if (focusPoll){ clearInterval(focusPoll); focusPoll = null; }
+  if (focusLinger){ clearTimeout(focusLinger); focusLinger = null; }
+}
+function flashFocusCard(){
+  const card = $('focus-card');
+  card.classList.remove('flash');
+  void card.offsetWidth;                      // restart the animation
+  card.classList.add('flash');
+  setTimeout(() => card.classList.remove('flash'), 700);
+}
+
+/* ask the server to do something - the same door the voice uses */
+async function submitFocus(text){
+  send.disabled = true;
+  const label = (focusState && focusState.phase !== 'idle') ? 'the session\u2026' : 'starting\u2026';
+  thinking(label);
+  setVoiceStatus('thinking', 'focus\u2026');
+  try {
+    const res = await fetch('/focus', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.error){
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'nothing to do with the notes'};
+      renderError(data.error || `The server returned HTTP ${res.status}.`, data.hint || '');
+      await speak(data.error || 'I could not do that, sir.');
+      return;
+    }
+    input.value = '';                          // the command has been handled: free the bar
+    paintFocus(data.focus || null);
+    if (data.focus) focusSpoken = Math.max(focusSpoken, data.focus.since || 0);
+    if (data.focus && data.focus.phase !== 'idle') startFocusPoll();
+    answerText.className = data.ok ? 'focus' : 'focus refused';
+    answerText.textContent = data.answer || '';
+    answerModel.textContent = '';
+    answerSrc.innerHTML = '';
+    hideFrame();
+    answerFoot.textContent = focusFoot(data);
+    showAnswer();
+    await speak(data.answer || data.spoken || '');
+  } catch (err){
+    renderError('Could not reach the server.', String(err));
+    await speak('I could not reach the server, sir, so nothing was changed.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+function focusFoot(data){
+  const st = data.focus || {};
+  const bits = [];
+  if (!data.ok) bits.push('NOTHING CHANGED');
+  if (st.phase) bits.push(st.phase);
+  if (st.planned_s) bits.push(Math.round(st.planned_s / 60) + 'm planned');
+  if (st.phase && st.phase !== 'idle') bits.push(Math.round(st.on_s / 60) + 'm on target');
+  if (st.drifts) bits.push(st.drifts + (st.drifts === 1 ? ' drift' : ' drifts'));
+  if (st.reader === 'blind') bits.push('cannot see the front app');
+  return bits.join(' \u00b7 ');
+}
+
+/* the button: start when nothing is running, end when something is */
+async function focusButton(){
+  if (focusButtonBusy) return;
+  focusButtonBusy = true;
+  try {
+    const live = focusState && (focusState.phase === 'running' || focusState.phase === 'paused');
+    if (live) return await submitFocus('end the session');
+    send.disabled = true;
+    thinking('starting\u2026');
+    try {
+      const res = await fetch('/focus', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'start', minutes: FOCUS_DEFAULT_MINUTES})
+      });
+      const data = await res.json().catch(() => ({}));
+      answerText.className = data.ok ? 'focus' : 'focus refused';
+      answerText.textContent = data.answer || data.error || '';
+      answerModel.textContent = '';
+      answerSrc.innerHTML = '';
+      hideFrame();
+      answerFoot.textContent = focusFoot(data);
+      showAnswer();
+      if (data.focus){ paintFocus(data.focus); focusSpoken = Math.max(focusSpoken, data.focus.since || 0); }
+      if (data.focus && data.focus.phase !== 'idle') startFocusPoll();
+      await speak(data.answer || data.error || '');
+    } catch (err){
+      renderError('Could not reach the server.', String(err));
+    }
+  } finally {
+    focusButtonBusy = false;
+    send.disabled = false;
+    input.focus();
+  }
+}
+
+/* The answer card, for a swap or a refusal. A refusal says so in the footer, in plain
+   words, so nobody can read a refusal as a success. */
+function renderBrain(data){
+  answerText.className = data.refused ? 'brain refused' : 'brain';
+  answerText.textContent = data.answer || '';
+  answerModel.textContent = data.model ? `\u00b7 ${data.model}` : '';
+  answerSrc.innerHTML = '';
+  hideFrame();
+  const bits = [];
+  if (data.refused) bits.push('NOT CHANGED');
+  if (data.swapped) bits.push('swapped until the next restart');
+  else bits.push('the brain in config.json');
+  if (data.refused && (data.have || []).length) bits.push('have: ' + data.have.join(' / '));
+  else if (data.model) bits.push(data.model);
+  if (data.turns != null) bits.push(`memory ${data.turns} turn${data.turns === 1 ? '' : 's'}`);
+  answerFoot.textContent = bits.join(' \u00b7 ');
+  showAnswer();
+}
+
+/* One path for both input methods: a typed question and a spoken one go through
+   exactly the same /chat flow, and every answer is spoken. */
+async function submitQuestion(question){
+  question = String(question || '').trim();
+  if (!question || send.disabled) return;
+  // The decisions, in order, before anything else happens.
+  // 1. "switch to astra" is a command about WHICH brain answers - not a question about
+  //    the notes and not a question about the screen. It is decided first of all, so a
+  //    brain swap works whatever else is going on, including during a screen share.
+  if (isBrainCommand(question)) return submitBrain(question);
+  // 2. a focus session: "thirty minutes on this", "pause", "give me fifteen seconds",
+  //    "it's okay, I'm doing research", "end the session". Decided here, BEFORE the
+  //    screen check, so a session can be driven by voice while a share is live.
+  if (isFocusCommand(question, focusState && focusState.phase)) return submitFocus(question);
+  // 3. "remember that ..." is a note, not a question - it goes to /remember.
+  if (isRemember(question)) return submitCapture(question);
+  // 4. while a share is live, EVERY question is about the screen: it carries one frame
+  //    taken right now and goes to /see. No keyword guessing while sharing, so a
+  //    screen question can never be answered from the notes by mistake.
+  if (shareState === 'live') return submitScreen(question, {reason: 'sharing'});
+  // 5. nothing is being shared and the question is plainly pointing at a screen: he says
+  //    so instead of answering it from the notes. "The share has ended" if he was looking
+  //    at your screen a moment ago, "I have not been shown your screen" otherwise - and
+  //    after the window has passed it is a normal question again, because a session that
+  //    ended ten minutes ago is not what you are asking about.
+  if (screenQuestion(question)){
+    const justEnded = shareState === 'ended' &&
+                      (performance.now() - shareEndedAt) < SIGHT_ENDED_WINDOW_MS;
+    if (justEnded) return submitScreen(question, {reason: 'ended'});
+    if (shareState === 'off') return submitScreen(question, {reason: 'never'});
+  }
+  send.disabled = true;
+  thinking();
+  setVoiceStatus('thinking', 'reading your notes\u2026');
+  answerBox.hidden = false;
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question})
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_){}
+    if (!res.ok || data.error){
+      const message = data.error || `The brain returned HTTP ${res.status}.`;
+      // no answer came back, so there is nothing to prove: hold the galaxy still
+      lastSourcePlan = {kind: 'still', nodes: [], why: 'no answer'};
+      renderError(message, data.hint || '');
+      await speak(message);
+    } else {
+      // 1. decide what this answer came from   2. act on it   3. speak
+      const plan = answerSource(data);
+      lastSourcePlan = plan;
+      renderAnswer(data, plan);
+      showAnswerSource(plan);        // the camera flies while the answer is being spoken
+      input.value = '';
+      const spoken = spokenText(data.answer || '');
+      await speak(spoken.text, spoken.trimmed ? 'the short version - the rest is on screen' : '');
+    }
+  } catch (err){
+    renderError('Could not reach the server.', String(err));
+    await speak('I could not reach the server.');
+  } finally {
+    send.disabled = false;
+    resumeIfHandsFree();
+    input.focus();
+  }
+}
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  // typing is not a hands-free turn: close the mic so it cannot hear Alfred's answer
+  resumeListeningAfterSpeech = false;
+  if (wantListening || listening) stopListening('typed');
+  submitQuestion(input.value);
+});
+
+/* rotating placeholder drawn from the actual note titles */
+(function rotatePlaceholder(){
+  let i = Math.floor(Math.random() * Math.max(1, NODES.length));
+  setInterval(() => {
+    if (document.activeElement === input || input.value || !NODES.length) return;
+    // while a screen share is live the placeholder belongs to the share: the note hints
+    // must not quietly take over the one line that says what your next question is about
+    if (shareState !== 'off'){ paintSight(); return; }
+    i = (i + 1) % NODES.length;
+    input.placeholder = `Ask about “${NODES[i].label}”…`;
+  }, 5200);
+})();
+
+/* ------------------------------------------------------------------ start */
+boot3d().catch(err => {
+  console.error('[alfred] boot failed', err);
+  boot.classList.remove('gone');
+  const tried = (err && err.tried || []).map(u => '<code>' + esc(u) + '</code>').join(', ');
+  bootMsg.innerHTML = 'The 3D layer could not start.<br><code>' + esc(err.message || err) + '</code>' +
+    (tried ? '<br><br>Tried: ' + tried : '') +
+    '<br><br>This page needs a WebGL-capable browser and one-time access to a CDN ' +
+    '(cdn.jsdelivr.net). If your network blocks CDNs, run <code>python3 tools/vendor.py</code> ' +
+    'once to keep a local copy, then reload. Details are in the browser console.';
+  $('status').className = 'bad';
+  $('status-text').textContent = 'boot failed';
+});
+</script>
+</body>
+</html>
